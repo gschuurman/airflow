@@ -141,7 +141,7 @@ class EcsCreateClusterOperator(EcsBaseOperator):
                     waiter_delay=self.waiter_delay,
                     waiter_max_attempts=self.waiter_max_attempts,
                     aws_conn_id=self.aws_conn_id,
-                    region_name=self.region,
+                    region_name=self.region_name,
                 ),
                 method_name="_complete_exec_with_cluster_desc",
                 # timeout is set to ensure that if a trigger dies, the timeout does not restart
@@ -218,7 +218,7 @@ class EcsDeleteClusterOperator(EcsBaseOperator):
                     waiter_delay=self.waiter_delay,
                     waiter_max_attempts=self.waiter_max_attempts,
                     aws_conn_id=self.aws_conn_id,
-                    region_name=self.region,
+                    region_name=self.region_name,
                 ),
                 method_name="_complete_exec_with_cluster_desc",
                 # timeout is set to ensure that if a trigger dies, the timeout does not restart
@@ -373,6 +373,10 @@ class EcsRunTaskOperator(EcsBaseOperator):
         When capacity_provider_strategy is specified, the launch_type parameter is omitted.
         If no capacity_provider_strategy or launch_type is specified,
         the default capacity provider strategy for the cluster is used.
+    :param volume_configurations: the volume configurations to use when using capacity provider. The name of the volume must match
+                                  the name from the task definition.
+                                  You can configure the settings like size, volume type, IOPS, throughput and others mentioned in
+                                  (https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_TaskManagedEBSVolumeConfiguration.html)
     :param group: the name of the task group associated with the task
     :param placement_constraints: an array of placement constraint objects to use for
         the task
@@ -420,6 +424,7 @@ class EcsRunTaskOperator(EcsBaseOperator):
         "overrides",
         "launch_type",
         "capacity_provider_strategy",
+        "volume_configurations",
         "group",
         "placement_constraints",
         "placement_strategy",
@@ -450,6 +455,7 @@ class EcsRunTaskOperator(EcsBaseOperator):
         overrides: dict,
         launch_type: str = "EC2",
         capacity_provider_strategy: list | None = None,
+        volume_configurations: list | None = None,
         group: str | None = None,
         placement_constraints: list | None = None,
         placement_strategy: list | None = None,
@@ -479,6 +485,7 @@ class EcsRunTaskOperator(EcsBaseOperator):
         self.overrides = overrides
         self.launch_type = launch_type
         self.capacity_provider_strategy = capacity_provider_strategy
+        self.volume_configurations = volume_configurations
         self.group = group
         self.placement_constraints = placement_constraints
         self.placement_strategy = placement_strategy
@@ -495,7 +502,7 @@ class EcsRunTaskOperator(EcsBaseOperator):
         self.number_logs_exception = number_logs_exception
 
         if self.awslogs_region is None:
-            self.awslogs_region = self.region
+            self.awslogs_region = self.region_name
 
         self.arn: str | None = None
         self._started_by: str | None = None
@@ -546,7 +553,7 @@ class EcsRunTaskOperator(EcsBaseOperator):
                     waiter_delay=self.waiter_delay,
                     waiter_max_attempts=self.waiter_max_attempts,
                     aws_conn_id=self.aws_conn_id,
-                    region=self.region,
+                    region=self.region_name,
                     log_group=self.awslogs_group,
                     log_stream=self._get_logs_stream_name(),
                 ),
@@ -586,10 +593,11 @@ class EcsRunTaskOperator(EcsBaseOperator):
         if event["status"] != "success":
             raise AirflowException(f"Error in task execution: {event}")
         self.arn = event["task_arn"]  # restore arn to its updated value, needed for next steps
+        self.cluster = event["cluster"]
         self._after_execution()
         if self._aws_logs_enabled():
             # same behavior as non-deferrable mode, return last line of logs of the task.
-            logs_client = AwsLogsHook(aws_conn_id=self.aws_conn_id, region_name=self.region).conn
+            logs_client = AwsLogsHook(aws_conn_id=self.aws_conn_id, region_name=self.region_name).conn
             one_log = logs_client.get_log_events(
                 logGroupName=self.awslogs_group,
                 logStreamName=self._get_logs_stream_name(),
@@ -613,6 +621,8 @@ class EcsRunTaskOperator(EcsBaseOperator):
 
         if self.capacity_provider_strategy:
             run_opts["capacityProviderStrategy"] = self.capacity_provider_strategy
+            if self.volume_configurations is not None:
+                run_opts["volumeConfigurations"] = self.volume_configurations
         elif self.launch_type:
             run_opts["launchType"] = self.launch_type
         if self.platform_version is not None:

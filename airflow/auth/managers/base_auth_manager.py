@@ -21,6 +21,7 @@ from abc import abstractmethod
 from functools import cached_property
 from typing import TYPE_CHECKING, Container, Literal, Sequence
 
+from flask_appbuilder.menu import MenuItem
 from sqlalchemy import select
 
 from airflow.auth.managers.models.resource_details import (
@@ -34,7 +35,6 @@ from airflow.utils.session import NEW_SESSION, provide_session
 
 if TYPE_CHECKING:
     from flask import Blueprint
-    from flask_appbuilder.menu import MenuItem
     from sqlalchemy.orm import Session
 
     from airflow.auth.managers.models.base_user import BaseUser
@@ -73,17 +73,12 @@ class BaseAuthManager(LoggingMixin):
         super().__init__()
         self.appbuilder = appbuilder
 
-    @staticmethod
-    def get_cli_commands() -> list[CLICommand]:
-        """Vends CLI commands to be included in Airflow CLI.
-
-        Override this method to expose commands via Airflow CLI to manage this auth manager.
+    def init(self) -> None:
         """
-        return []
+        Run operations when Airflow is initializing.
 
-    def get_api_endpoints(self) -> None | Blueprint:
-        """Return API endpoint(s) definition for the auth manager."""
-        return None
+        By default, do nothing.
+        """
 
     def get_user_name(self) -> str:
         """Return the username associated to the user in session."""
@@ -111,16 +106,25 @@ class BaseAuthManager(LoggingMixin):
             return str(user_id)
         return None
 
-    def init(self) -> None:
-        """
-        Run operations when Airflow is initializing.
-
-        By default, do nothing.
-        """
-
     @abstractmethod
     def is_logged_in(self) -> bool:
         """Return whether the user is logged in."""
+
+    @abstractmethod
+    def get_url_login(self, **kwargs) -> str:
+        """Return the login page url."""
+
+    @abstractmethod
+    def get_url_logout(self) -> str:
+        """Return the logout page url."""
+
+    def get_url_user_profile(self) -> str | None:
+        """
+        Return the url to a page displaying info about the current user.
+
+        By default, return None.
+        """
+        return None
 
     @abstractmethod
     def is_authorized_configuration(
@@ -237,7 +241,7 @@ class BaseAuthManager(LoggingMixin):
 
     @abstractmethod
     def is_authorized_custom_view(
-        self, *, method: ResourceMethod, resource_name: str, user: BaseUser | None = None
+        self, *, method: ResourceMethod | str, resource_name: str, user: BaseUser | None = None
     ):
         """
         Return whether the user is authorized to perform a given action on a custom view.
@@ -246,7 +250,10 @@ class BaseAuthManager(LoggingMixin):
         the auth manager is used as part of the environment. It can also be a view defined as part of a
         plugin defined by a user.
 
-        :param method: the method to perform
+        :param method: the method to perform.
+            The method can also be a string if the action has been defined in a plugin.
+            In that case, the action can be anything (e.g. can_do).
+            See https://github.com/apache/airflow/issues/39144
         :param resource_name: the name of the resource
         :param user: the user to perform the action on. If not provided (or None), it uses the current user
         """
@@ -394,30 +401,20 @@ class BaseAuthManager(LoggingMixin):
         )
         accessible_items = []
         for menu_item in items:
+            menu_item_copy = MenuItem(
+                **{
+                    **menu_item.__dict__,
+                    "childs": [],
+                }
+            )
             if menu_item.childs:
                 accessible_children = []
                 for child in menu_item.childs:
                     if self.security_manager.has_access(ACTION_CAN_ACCESS_MENU, child.name):
                         accessible_children.append(child)
-                menu_item.childs = accessible_children
-            accessible_items.append(menu_item)
+                menu_item_copy.childs = accessible_children
+            accessible_items.append(menu_item_copy)
         return accessible_items
-
-    @abstractmethod
-    def get_url_login(self, **kwargs) -> str:
-        """Return the login page url."""
-
-    @abstractmethod
-    def get_url_logout(self) -> str:
-        """Return the logout page url."""
-
-    def get_url_user_profile(self) -> str | None:
-        """
-        Return the url to a page displaying info about the current user.
-
-        By default, return None.
-        """
-        return None
 
     @cached_property
     def security_manager(self) -> AirflowSecurityManagerV2:
@@ -433,3 +430,19 @@ class BaseAuthManager(LoggingMixin):
         from airflow.www.security_manager import AirflowSecurityManagerV2
 
         return AirflowSecurityManagerV2(self.appbuilder)
+
+    @staticmethod
+    def get_cli_commands() -> list[CLICommand]:
+        """
+        Vends CLI commands to be included in Airflow CLI.
+
+        Override this method to expose commands via Airflow CLI to manage this auth manager.
+        """
+        return []
+
+    def get_api_endpoints(self) -> None | Blueprint:
+        """Return API endpoint(s) definition for the auth manager."""
+        return None
+
+    def register_views(self) -> None:
+        """Register views specific to the auth manager."""

@@ -39,6 +39,7 @@ from airflow.providers.amazon.aws.triggers.ecs import TaskDoneTrigger
 from airflow.providers.amazon.aws.utils.task_log_fetcher import AwsTaskLogFetcher
 from airflow.utils.task_instance_session import set_current_task_instance_session
 from airflow.utils.types import NOTSET
+from tests.providers.amazon.aws.utils.test_template_fields import validate_template_fields
 
 CLUSTER_NAME = "test_cluster"
 CONTAINER_NAME = "e1ed7aac-d9b2-4315-8726-d2432bf11868"
@@ -109,18 +110,18 @@ class TestEcsBaseOperator(EcsBaseTestCase):
     @pytest.mark.parametrize("region_name", [None, NOTSET, "ca-central-1"])
     def test_initialise_operator(self, aws_conn_id, region_name):
         """Test initialize operator."""
-        op_kw = {"aws_conn_id": aws_conn_id, "region": region_name}
+        op_kw = {"aws_conn_id": aws_conn_id, "region_name": region_name}
         op_kw = {k: v for k, v in op_kw.items() if v is not NOTSET}
         op = EcsBaseOperator(task_id="test_ecs_base", **op_kw)
 
         assert op.aws_conn_id == (aws_conn_id if aws_conn_id is not NOTSET else "aws_default")
-        assert op.region == (region_name if region_name is not NOTSET else None)
+        assert op.region_name == (region_name if region_name is not NOTSET else None)
 
     @pytest.mark.parametrize("aws_conn_id", [None, NOTSET, "aws_test_conn"])
     @pytest.mark.parametrize("region_name", [None, NOTSET, "ca-central-1"])
     def test_initialise_operator_hook(self, aws_conn_id, region_name):
         """Test initialize operator."""
-        op_kw = {"aws_conn_id": aws_conn_id, "region": region_name}
+        op_kw = {"aws_conn_id": aws_conn_id, "region_name": region_name}
         op_kw = {k: v for k, v in op_kw.items() if v is not NOTSET}
         op = EcsBaseOperator(task_id="test_ecs_base", **op_kw)
 
@@ -172,6 +173,7 @@ class TestEcsRunTaskOperator(EcsBaseTestCase):
             "overrides",
             "launch_type",
             "capacity_provider_strategy",
+            "volume_configurations",
             "group",
             "placement_constraints",
             "placement_strategy",
@@ -674,13 +676,13 @@ class TestEcsRunTaskOperator(EcsBaseTestCase):
 
     @mock.patch.object(EcsRunTaskOperator, "client", new_callable=PropertyMock)
     def test_execute_complete(self, client_mock):
-        event = {"status": "success", "task_arn": "my_arn"}
+        event = {"status": "success", "task_arn": "my_arn", "cluster": "test_cluster"}
         self.ecs.reattach = True
 
         self.ecs.execute_complete(None, event)
 
         # task gets described to assert its success
-        client_mock().describe_tasks.assert_called_once_with(cluster="c", tasks=["my_arn"])
+        client_mock().describe_tasks.assert_called_once_with(cluster="test_cluster", tasks=["my_arn"])
 
     @pytest.mark.db_test
     @pytest.mark.parametrize(
@@ -793,6 +795,17 @@ class TestEcsCreateClusterOperator(EcsBaseTestCase):
         patch_hook_waiters.assert_not_called()
         assert result is not None
 
+    def test_template_fields(self):
+        op = EcsCreateClusterOperator(
+            task_id="task",
+            cluster_name=CLUSTER_NAME,
+            deferrable=True,
+            waiter_delay=12,
+            waiter_max_attempts=34,
+        )
+
+        validate_template_fields(op)
+
 
 class TestEcsDeleteClusterOperator(EcsBaseTestCase):
     @pytest.mark.parametrize("waiter_delay, waiter_max_attempts", WAITERS_TEST_CASES)
@@ -857,15 +870,24 @@ class TestEcsDeleteClusterOperator(EcsBaseTestCase):
         patch_hook_waiters.assert_not_called()
         assert result is not None
 
+    def test_template_fields(self):
+        op = EcsDeleteClusterOperator(
+            task_id="task",
+            cluster_name=CLUSTER_NAME,
+            deferrable=True,
+            waiter_delay=12,
+            waiter_max_attempts=34,
+        )
+
+        validate_template_fields(op)
+
 
 class TestEcsDeregisterTaskDefinitionOperator(EcsBaseTestCase):
     warn_message = "'wait_for_completion' and waiter related params have no effect"
 
     def test_execute_immediate_delete(self):
         """Test if task definition deleted during initial request."""
-        op = EcsDeregisterTaskDefinitionOperator(
-            task_id="task", task_definition=TASK_DEFINITION_NAME, wait_for_completion=True
-        )
+        op = EcsDeregisterTaskDefinitionOperator(task_id="task", task_definition=TASK_DEFINITION_NAME)
         with mock.patch.object(self.client, "deregister_task_definition") as mock_client_method:
             mock_client_method.return_value = {
                 "taskDefinition": {"status": "INACTIVE", "taskDefinitionArn": "foo-bar"}
@@ -914,6 +936,11 @@ class TestEcsDeregisterTaskDefinitionOperator(EcsBaseTestCase):
                 assert not hasattr(ti.task, "wait_for_completion")
                 assert not hasattr(ti.task, "waiter_delay")
                 assert not hasattr(ti.task, "waiter_max_attempts")
+
+    def test_template_fields(self):
+        op = EcsDeregisterTaskDefinitionOperator(task_id="task", task_definition=TASK_DEFINITION_NAME)
+
+        validate_template_fields(op)
 
 
 class TestEcsRegisterTaskDefinitionOperator(EcsBaseTestCase):
@@ -992,3 +1019,8 @@ class TestEcsRegisterTaskDefinitionOperator(EcsBaseTestCase):
                 assert not hasattr(ti.task, "wait_for_completion")
                 assert not hasattr(ti.task, "waiter_delay")
                 assert not hasattr(ti.task, "waiter_max_attempts")
+
+    def test_template_fields(self):
+        op = EcsRegisterTaskDefinitionOperator(task_id="task", **TASK_DEFINITION_CONFIG)
+
+        validate_template_fields(op)

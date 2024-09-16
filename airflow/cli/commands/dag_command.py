@@ -26,9 +26,9 @@ import operator
 import signal
 import subprocess
 import sys
-import warnings
 from typing import TYPE_CHECKING
 
+import re2
 from sqlalchemy import delete, select
 
 from airflow import settings
@@ -36,7 +36,7 @@ from airflow.api.client import get_current_api_client
 from airflow.api_connexion.schemas.dag_schema import dag_schema
 from airflow.cli.simple_table import AirflowConsole
 from airflow.configuration import conf
-from airflow.exceptions import AirflowException, RemovedInAirflow3Warning
+from airflow.exceptions import AirflowException
 from airflow.jobs.job import Job
 from airflow.models import DagBag, DagModel, DagRun, TaskInstance
 from airflow.models.dag import DAG
@@ -49,6 +49,7 @@ from airflow.utils.helpers import ask_yesno
 from airflow.utils.providers_configuration_loader import providers_configuration_loaded
 from airflow.utils.session import NEW_SESSION, create_session, provide_session
 from airflow.utils.state import DagRunState
+from airflow.utils.types import DagRunTriggeredByType
 
 if TYPE_CHECKING:
     from graphviz.dot import Dot
@@ -86,6 +87,7 @@ def _run_dag_backfill(dags: list[DAG], args) -> None:
                     dag.dag_id,
                     execution_date=dagrun_info.logical_date,
                     data_interval=dagrun_info.data_interval,
+                    triggered_by=DagRunTriggeredByType.CLI,
                 )
 
                 for task in dag.tasks:
@@ -100,7 +102,6 @@ def _run_dag_backfill(dags: list[DAG], args) -> None:
                     start_date=args.start_date,
                     end_date=args.end_date,
                     confirm_prompt=not args.yes,
-                    include_subdags=True,
                     dag_run_state=DagRunState.QUEUED,
                 )
 
@@ -133,19 +134,7 @@ def dag_backfill(args, dag: list[DAG] | DAG | None = None) -> None:
     """Create backfill job or dry run for a DAG or list of DAGs using regex."""
     logging.basicConfig(level=settings.LOGGING_LEVEL, format=settings.SIMPLE_LOG_FORMAT)
     signal.signal(signal.SIGTERM, sigint_handler)
-    if args.ignore_first_depends_on_past:
-        warnings.warn(
-            "--ignore-first-depends-on-past is deprecated as the value is always set to True",
-            category=RemovedInAirflow3Warning,
-        )
     args.ignore_first_depends_on_past = True
-
-    if not args.treat_dag_id_as_regex and args.treat_dag_as_regex:
-        warnings.warn(
-            "--treat-dag-as-regex is deprecated, use --treat-dag-id-as-regex instead",
-            category=RemovedInAirflow3Warning,
-        )
-        args.treat_dag_id_as_regex = args.treat_dag_as_regex
 
     if not args.start_date and not args.end_date:
         raise AirflowException("Provide a start_date and/or end_date")
@@ -222,18 +211,24 @@ def dag_unpause(args) -> None:
 def set_is_paused(is_paused: bool, args) -> None:
     """Set is_paused for DAG by a given dag_id."""
     should_apply = True
-    dags = [
-        dag
-        for dag in get_dags(args.subdir, dag_id=args.dag_id, use_regex=args.treat_dag_id_as_regex)
-        if is_paused != dag.get_is_paused()
-    ]
+    with create_session() as session:
+        query = select(DagModel)
 
-    if not dags:
+        if args.treat_dag_id_as_regex:
+            query = query.where(DagModel.dag_id.regexp_match(args.dag_id))
+        else:
+            query = query.where(DagModel.dag_id == args.dag_id)
+
+        query = query.where(DagModel.is_paused != is_paused)
+
+        matched_dags = session.scalars(query).all()
+
+    if not matched_dags:
         print(f"No {'un' if is_paused else ''}paused DAGs were found")
         return
 
     if not args.yes and args.treat_dag_id_as_regex:
-        dags_ids = [dag.dag_id for dag in dags]
+        dags_ids = [dag.dag_id for dag in matched_dags]
         question = (
             f"You are about to {'un' if not is_paused else ''}pause {len(dags_ids)} DAGs:\n"
             f"{','.join(dags_ids)}"
@@ -242,17 +237,11 @@ def set_is_paused(is_paused: bool, args) -> None:
         should_apply = ask_yesno(question)
 
     if should_apply:
-        dags_models = [DagModel.get_dagmodel(dag.dag_id) for dag in dags]
-        for dag_model in dags_models:
-            if dag_model is not None:
-                dag_model.set_is_paused(is_paused=is_paused)
+        for dag_model in matched_dags:
+            dag_model.set_is_paused(is_paused=is_paused)
 
         AirflowConsole().print_as(
-            data=[
-                {"dag_id": dag.dag_id, "is_paused": dag.get_is_paused()}
-                for dag in dags_models
-                if dag is not None
-            ],
+            data=[{"dag_id": dag.dag_id, "is_paused": not dag.get_is_paused()} for dag in matched_dags],
             output=args.output,
         )
     else:
@@ -262,7 +251,11 @@ def set_is_paused(is_paused: bool, args) -> None:
 @providers_configuration_loaded
 def dag_dependencies_show(args) -> None:
     """Display DAG dependencies, save to file or show as imgcat image."""
-    dot = render_dag_dependencies(SerializedDagModel.get_dag_dependencies())
+    deduplicated_dag_dependencies = {
+        dag_id: list(set(dag_dependencies))
+        for dag_id, dag_dependencies in SerializedDagModel.get_dag_dependencies().items()
+    }
+    dot = render_dag_dependencies(deduplicated_dag_dependencies)
     filename = args.save
     imgcat = args.imgcat
 
@@ -327,10 +320,8 @@ def _get_dagbag_dag_details(dag: DAG) -> dict:
     return {
         "dag_id": dag.dag_id,
         "dag_display_name": dag.dag_display_name,
-        "root_dag_id": dag.parent_dag.dag_id if dag.parent_dag else None,
         "is_paused": dag.get_is_paused(),
         "is_active": dag.get_is_active(),
-        "is_subdag": dag.is_subdag,
         "last_parsed_time": None,
         "last_pickled": None,
         "last_expired": None,
@@ -341,7 +332,7 @@ def _get_dagbag_dag_details(dag: DAG) -> dict:
         "file_token": None,
         "owners": dag.owner,
         "description": dag.description,
-        "schedule_interval": dag.schedule_interval,
+        "timetable_summary": dag.timetable.summary,
         "timetable_description": dag.timetable.description,
         "tags": dag.tags,
         "max_active_tasks": dag.max_active_tasks,
@@ -603,9 +594,21 @@ def dag_test(args, dag: DAG | None = None, session: Session = NEW_SESSION) -> No
         except ValueError as e:
             raise SystemExit(f"Configuration {args.conf!r} is not valid JSON. Error: {e}")
     execution_date = args.execution_date or timezone.utcnow()
+    use_executor = args.use_executor
+
+    mark_success_pattern = (
+        re2.compile(args.mark_success_pattern) if args.mark_success_pattern is not None else None
+    )
+
     with _airflow_parsing_context_manager(dag_id=args.dag_id):
         dag = dag or get_dag(subdir=args.subdir, dag_id=args.dag_id)
-    dr: DagRun = dag.test(execution_date=execution_date, run_conf=run_conf, session=session)
+    dr: DagRun = dag.test(
+        execution_date=execution_date,
+        run_conf=run_conf,
+        use_executor=use_executor,
+        mark_success_pattern=mark_success_pattern,
+        session=session,
+    )
     show_dagrun = args.show_dagrun
     imgcat = args.imgcat_dagrun
     filename = args.save_dagrun

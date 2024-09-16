@@ -68,7 +68,7 @@ class TestCommands:
     def test_airflow_version(self, default_docker_image):
         """Checking 'airflow version' command. It should return zero exit code."""
         output = run_airflow_cmd_in_docker(["version"], image=default_docker_image)
-        assert "2." in output
+        assert "3." in output
 
     def test_python_version(self, default_docker_image):
         """Checking 'python --version' command. It should return zero exit code."""
@@ -174,6 +174,12 @@ class TestPythonPackages:
     @pytest.mark.parametrize("package_name,import_names", PACKAGE_IMPORTS.items())
     def test_check_dependencies_imports(self, package_name, import_names, default_docker_image):
         run_python_in_docker(f"import {','.join(import_names)}", image=default_docker_image)
+
+    def test_there_is_no_opt_airflow_airflow_folder(self, default_docker_image):
+        output = run_bash_in_docker(
+            "find /opt/airflow/airflow/ 2>/dev/null | wc -l", image=default_docker_image
+        )
+        assert output == "0"
 
 
 class TestExecuteAsRoot:

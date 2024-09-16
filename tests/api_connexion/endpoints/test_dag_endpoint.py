@@ -36,7 +36,7 @@ from tests.test_utils.config import conf_vars
 from tests.test_utils.db import clear_db_dags, clear_db_runs, clear_db_serialized_dags
 from tests.test_utils.www import _check_last_log
 
-pytestmark = pytest.mark.db_test
+pytestmark = [pytest.mark.db_test, pytest.mark.skip_if_database_isolation_mode]
 
 
 @pytest.fixture
@@ -69,15 +69,24 @@ def configured_app(minimal_app_for_api):
     create_user(app, username="test_granular_permissions", role_name="TestGranularDag")  # type: ignore
     app.appbuilder.sm.sync_perm_for_dag(  # type: ignore
         "TEST_DAG_1",
-        access_control={"TestGranularDag": [permissions.ACTION_CAN_EDIT, permissions.ACTION_CAN_READ]},
+        access_control={
+            "TestGranularDag": {
+                permissions.RESOURCE_DAG: {permissions.ACTION_CAN_EDIT, permissions.ACTION_CAN_READ}
+            },
+        },
     )
     app.appbuilder.sm.sync_perm_for_dag(  # type: ignore
         "TEST_DAG_1",
-        access_control={"TestGranularDag": [permissions.ACTION_CAN_EDIT, permissions.ACTION_CAN_READ]},
+        access_control={
+            "TestGranularDag": {
+                permissions.RESOURCE_DAG: {permissions.ACTION_CAN_EDIT, permissions.ACTION_CAN_READ}
+            },
+        },
     )
 
     with DAG(
         DAG_ID,
+        schedule=None,
         start_date=datetime(2020, 6, 15),
         doc_md="details",
         params={"foo": 1},
@@ -85,10 +94,10 @@ def configured_app(minimal_app_for_api):
     ) as dag:
         EmptyOperator(task_id=TASK_ID)
 
-    with DAG(DAG2_ID, start_date=datetime(2020, 6, 15)) as dag2:  # no doc_md
+    with DAG(DAG2_ID, schedule=None, start_date=datetime(2020, 6, 15)) as dag2:  # no doc_md
         EmptyOperator(task_id=TASK_ID)
 
-    with DAG(DAG3_ID) as dag3:  # DAG start_date set to None
+    with DAG(DAG3_ID, schedule=None) as dag3:  # DAG start_date set to None
         EmptyOperator(task_id=TASK_ID, start_date=datetime(2019, 6, 12))
 
     dag_bag = DagBag(os.devnull, include_examples=False)
@@ -128,7 +137,7 @@ class TestDagEndpoint:
             dag_model = DagModel(
                 dag_id=f"{dag_id_prefix}_{num}",
                 fileloc=f"/tmp/dag_{num}.py",
-                schedule_interval="2 2 * * *",
+                timetable_summary="2 2 * * *",
                 is_active=True,
                 is_paused=is_paused,
             )
@@ -139,7 +148,7 @@ class TestDagEndpoint:
         dag_model = DagModel(
             dag_id=dag_id,
             fileloc="/tmp/dag.py",
-            schedule_interval="2 2 * * *",
+            timetable_summary="2 2 * * *",
             is_active=True,
             is_paused=False,
         )
@@ -150,7 +159,7 @@ class TestDagEndpoint:
         dag_model = DagModel(
             dag_id=dag_id,
             fileloc="/tmp/dag.py",
-            schedule_interval="2 2 * * *",
+            timetable_summary="2 2 * * *",
             is_active=True,
             is_paused=False,
             dataset_expression={
@@ -167,7 +176,7 @@ class TestDagEndpoint:
         dag_model = DagModel(
             dag_id="TEST_DAG_DELETED_1",
             fileloc="/tmp/dag_del_1.py",
-            schedule_interval="2 2 * * *",
+            timetable_summary="2 2 * * *",
             is_active=False,
         )
         session.add(dag_model)
@@ -187,10 +196,8 @@ class TestGetDag(TestDagEndpoint):
             "file_token": "Ii90bXAvZGFnXzEucHki.EnmIdPaUPo26lHQClbWMbDFD1Pk",
             "is_paused": False,
             "is_active": True,
-            "is_subdag": False,
             "owners": [],
-            "root_dag_id": None,
-            "schedule_interval": {"__type": "CronExpression", "value": "2 2 * * *"},
+            "timetable_summary": "2 2 * * *",
             "tags": [],
             "next_dagrun": None,
             "has_task_concurrency_limits": True,
@@ -211,11 +218,11 @@ class TestGetDag(TestDagEndpoint):
         } == response.json
 
     @conf_vars({("webserver", "secret_key"): "mysecret"})
-    def test_should_respond_200_with_schedule_interval_none(self, session):
+    def test_should_respond_200_with_schedule_none(self, session):
         dag_model = DagModel(
             dag_id="TEST_DAG_1",
             fileloc="/tmp/dag_1.py",
-            schedule_interval=None,
+            timetable_summary=None,
             is_paused=False,
         )
         session.add(dag_model)
@@ -230,10 +237,8 @@ class TestGetDag(TestDagEndpoint):
             "file_token": "Ii90bXAvZGFnXzEucHki.EnmIdPaUPo26lHQClbWMbDFD1Pk",
             "is_paused": False,
             "is_active": False,
-            "is_subdag": False,
             "owners": [],
-            "root_dag_id": None,
-            "schedule_interval": None,
+            "timetable_summary": None,
             "tags": [],
             "next_dagrun": None,
             "has_task_concurrency_limits": True,
@@ -289,7 +294,7 @@ class TestGetDag(TestDagEndpoint):
         [
             ["dag_id"],  # only one
             ["fileloc", "file_token", "owners"],  # auto_field and fields.Method
-            ["schedule_interval", "tags"],  # fields.List
+            ["tags"],  # fields.List
         ],
     )
     def test_should_return_specified_fields(self, fields):
@@ -316,6 +321,24 @@ class TestGetDag(TestDagEndpoint):
             f"/api/v1/dags/TEST_DAG_1?fields={','.join(fields)}", environ_overrides={"REMOTE_USER": "test"}
         )
         assert response.status_code == 400, f"Current code: {response.status_code}"
+
+    @pytest.mark.parametrize(
+        "set_auto_role_public, expected_status_code",
+        (("Public", 403), ("Admin", 200)),
+        indirect=["set_auto_role_public"],
+    )
+    def test_with_auth_role_public_set(self, set_auto_role_public, expected_status_code, session):
+        dag_model = DagModel(
+            dag_id="TEST_DAG_1",
+            fileloc="/tmp/dag_1.py",
+            timetable_summary=None,
+            is_paused=False,
+        )
+        session.add(dag_model)
+        session.commit()
+
+        response = self.client.get("/api/v1/dags/TEST_DAG_1")
+        assert response.status_code == expected_status_code
 
 
 class TestGetDagDetails(TestDagEndpoint):
@@ -345,7 +368,6 @@ class TestGetDagDetails(TestDagEndpoint):
             "is_active": True,
             "is_paused": False,
             "is_paused_upon_creation": None,
-            "is_subdag": False,
             "last_expired": None,
             "last_parsed": last_parsed,
             "last_parsed_time": None,
@@ -369,8 +391,7 @@ class TestGetDagDetails(TestDagEndpoint):
             },
             "pickle_id": None,
             "render_template_as_native_obj": False,
-            "root_dag_id": None,
-            "schedule_interval": {"__type": "CronExpression", "value": "2 2 * * *"},
+            "timetable_summary": "2 2 * * *",
             "scheduler_lock": None,
             "start_date": "2020-06-15T00:00:00+00:00",
             "tags": [],
@@ -411,7 +432,6 @@ class TestGetDagDetails(TestDagEndpoint):
             "is_active": True,
             "is_paused": False,
             "is_paused_upon_creation": None,
-            "is_subdag": False,
             "last_expired": None,
             "last_parsed": last_parsed,
             "last_parsed_time": None,
@@ -435,8 +455,7 @@ class TestGetDagDetails(TestDagEndpoint):
             },
             "pickle_id": None,
             "render_template_as_native_obj": False,
-            "root_dag_id": None,
-            "schedule_interval": {"__type": "CronExpression", "value": "2 2 * * *"},
+            "timetable_summary": "2 2 * * *",
             "scheduler_lock": None,
             "start_date": "2020-06-15T00:00:00+00:00",
             "tags": [],
@@ -472,7 +491,6 @@ class TestGetDagDetails(TestDagEndpoint):
             "is_active": True,
             "is_paused": False,
             "is_paused_upon_creation": None,
-            "is_subdag": False,
             "last_expired": None,
             "last_parsed": last_parsed,
             "last_parsed_time": None,
@@ -489,8 +507,7 @@ class TestGetDagDetails(TestDagEndpoint):
             "params": {},
             "pickle_id": None,
             "render_template_as_native_obj": False,
-            "root_dag_id": None,
-            "schedule_interval": {"__type": "CronExpression", "value": "2 2 * * *"},
+            "timetable_summary": "2 2 * * *",
             "scheduler_lock": None,
             "start_date": "2020-06-15T00:00:00+00:00",
             "tags": [],
@@ -526,7 +543,6 @@ class TestGetDagDetails(TestDagEndpoint):
             "is_active": True,
             "is_paused": False,
             "is_paused_upon_creation": None,
-            "is_subdag": False,
             "last_expired": None,
             "last_parsed": last_parsed,
             "last_parsed_time": None,
@@ -543,8 +559,7 @@ class TestGetDagDetails(TestDagEndpoint):
             "params": {},
             "pickle_id": None,
             "render_template_as_native_obj": False,
-            "root_dag_id": None,
-            "schedule_interval": {"__type": "CronExpression", "value": "2 2 * * *"},
+            "timetable_summary": "2 2 * * *",
             "scheduler_lock": None,
             "start_date": None,
             "tags": [],
@@ -583,7 +598,6 @@ class TestGetDagDetails(TestDagEndpoint):
             "is_active": True,
             "is_paused": False,
             "is_paused_upon_creation": None,
-            "is_subdag": False,
             "last_expired": None,
             "last_parsed_time": None,
             "last_pickled": None,
@@ -606,8 +620,7 @@ class TestGetDagDetails(TestDagEndpoint):
             },
             "pickle_id": None,
             "render_template_as_native_obj": False,
-            "root_dag_id": None,
-            "schedule_interval": {"__type": "CronExpression", "value": "2 2 * * *"},
+            "timetable_summary": "2 2 * * *",
             "scheduler_lock": None,
             "start_date": "2020-06-15T00:00:00+00:00",
             "tags": [],
@@ -647,7 +660,6 @@ class TestGetDagDetails(TestDagEndpoint):
             "is_active": True,
             "is_paused": False,
             "is_paused_upon_creation": None,
-            "is_subdag": False,
             "last_expired": None,
             "last_parsed_time": None,
             "last_pickled": None,
@@ -670,8 +682,7 @@ class TestGetDagDetails(TestDagEndpoint):
             },
             "pickle_id": None,
             "render_template_as_native_obj": False,
-            "root_dag_id": None,
-            "schedule_interval": {"__type": "CronExpression", "value": "2 2 * * *"},
+            "timetable_summary": "2 2 * * *",
             "scheduler_lock": None,
             "start_date": "2020-06-15T00:00:00+00:00",
             "tags": [],
@@ -704,7 +715,7 @@ class TestGetDagDetails(TestDagEndpoint):
         [
             ["dag_id"],  # only one
             ["doc_md", "file_token", "owners"],  # fields.String and fields.Method
-            ["schedule_interval", "tags"],  # fields.List
+            ["tags"],  # fields.List
         ],
     )
     def test_should_return_specified_fields(self, fields):
@@ -728,6 +739,18 @@ class TestGetDagDetails(TestDagEndpoint):
         )
         assert response.status_code == 400, f"Current code: {response.status_code}"
 
+    @pytest.mark.parametrize(
+        "set_auto_role_public, expected_status_code",
+        (("Public", 403), ("Admin", 200)),
+        indirect=["set_auto_role_public"],
+    )
+    def test_with_auth_role_public_set(self, set_auto_role_public, expected_status_code, url_safe_serializer):
+        self._create_dag_model_for_details_endpoint(self.dag_id)
+        url_safe_serializer.dumps("/tmp/dag.py")
+        response = self.client.get(f"/api/v1/dags/{self.dag_id}/details")
+
+        assert response.status_code == expected_status_code
+
 
 class TestGetDags(TestDagEndpoint):
     @provide_session
@@ -735,7 +758,7 @@ class TestGetDags(TestDagEndpoint):
         self._create_dag_models(2)
         self._create_deactivated_dag()
 
-        dags_query = session.query(DagModel).filter(~DagModel.is_subdag)
+        dags_query = session.query(DagModel)
         assert len(dags_query.all()) == 3
 
         response = self.client.get("api/v1/dags", environ_overrides={"REMOTE_USER": "test"})
@@ -753,13 +776,8 @@ class TestGetDags(TestDagEndpoint):
                     "file_token": file_token,
                     "is_paused": False,
                     "is_active": True,
-                    "is_subdag": False,
                     "owners": [],
-                    "root_dag_id": None,
-                    "schedule_interval": {
-                        "__type": "CronExpression",
-                        "value": "2 2 * * *",
-                    },
+                    "timetable_summary": "2 2 * * *",
                     "tags": [],
                     "next_dagrun": None,
                     "has_task_concurrency_limits": True,
@@ -786,13 +804,8 @@ class TestGetDags(TestDagEndpoint):
                     "file_token": file_token2,
                     "is_paused": False,
                     "is_active": True,
-                    "is_subdag": False,
                     "owners": [],
-                    "root_dag_id": None,
-                    "schedule_interval": {
-                        "__type": "CronExpression",
-                        "value": "2 2 * * *",
-                    },
+                    "timetable_summary": "2 2 * * *",
                     "tags": [],
                     "next_dagrun": None,
                     "has_task_concurrency_limits": True,
@@ -831,13 +844,8 @@ class TestGetDags(TestDagEndpoint):
                     "file_token": file_token,
                     "is_paused": False,
                     "is_active": True,
-                    "is_subdag": False,
                     "owners": [],
-                    "root_dag_id": None,
-                    "schedule_interval": {
-                        "__type": "CronExpression",
-                        "value": "2 2 * * *",
-                    },
+                    "timetable_summary": "2 2 * * *",
                     "tags": [],
                     "next_dagrun": None,
                     "has_task_concurrency_limits": True,
@@ -877,13 +885,8 @@ class TestGetDags(TestDagEndpoint):
                     "file_token": file_token,
                     "is_paused": False,
                     "is_active": True,
-                    "is_subdag": False,
                     "owners": [],
-                    "root_dag_id": None,
-                    "schedule_interval": {
-                        "__type": "CronExpression",
-                        "value": "2 2 * * *",
-                    },
+                    "timetable_summary": "2 2 * * *",
                     "tags": [],
                     "next_dagrun": None,
                     "has_task_concurrency_limits": True,
@@ -910,13 +913,8 @@ class TestGetDags(TestDagEndpoint):
                     "file_token": file_token_2,
                     "is_paused": False,
                     "is_active": False,
-                    "is_subdag": False,
                     "owners": [],
-                    "root_dag_id": None,
-                    "schedule_interval": {
-                        "__type": "CronExpression",
-                        "value": "2 2 * * *",
-                    },
+                    "timetable_summary": "2 2 * * *",
                     "tags": [],
                     "next_dagrun": None,
                     "has_task_concurrency_limits": True,
@@ -950,10 +948,10 @@ class TestGetDags(TestDagEndpoint):
     )
     def test_filter_dags_by_tags_works(self, url, expected_dag_ids):
         # test filter by tags
-        dag1 = DAG(dag_id="TEST_DAG_1", tags=["t1"])
-        dag2 = DAG(dag_id="TEST_DAG_2", tags=["t2"])
-        dag3 = DAG(dag_id="TEST_DAG_3", tags=["t1", "t2"])
-        dag4 = DAG(dag_id="TEST_DAG_4")
+        dag1 = DAG(dag_id="TEST_DAG_1", schedule=None, tags=["t1"])
+        dag2 = DAG(dag_id="TEST_DAG_2", schedule=None, tags=["t2"])
+        dag3 = DAG(dag_id="TEST_DAG_3", schedule=None, tags=["t1", "t2"])
+        dag4 = DAG(dag_id="TEST_DAG_4", schedule=None)
         dag1.sync_to_db()
         dag2.sync_to_db()
         dag3.sync_to_db()
@@ -978,10 +976,10 @@ class TestGetDags(TestDagEndpoint):
     )
     def test_filter_dags_by_dag_id_works(self, url, expected_dag_ids):
         # test filter by tags
-        dag1 = DAG(dag_id="TEST_DAG_1")
-        dag2 = DAG(dag_id="TEST_DAG_2")
-        dag3 = DAG(dag_id="SAMPLE_DAG_1")
-        dag4 = DAG(dag_id="SAMPLE_DAG_2")
+        dag1 = DAG(dag_id="TEST_DAG_1", schedule=None)
+        dag2 = DAG(dag_id="TEST_DAG_2", schedule=None)
+        dag3 = DAG(dag_id="SAMPLE_DAG_1", schedule=None)
+        dag4 = DAG(dag_id="SAMPLE_DAG_2", schedule=None)
         dag1.sync_to_db()
         dag2.sync_to_db()
         dag3.sync_to_db()
@@ -1081,13 +1079,8 @@ class TestGetDags(TestDagEndpoint):
                     "file_token": file_token,
                     "is_paused": True,
                     "is_active": True,
-                    "is_subdag": False,
                     "owners": [],
-                    "root_dag_id": None,
-                    "schedule_interval": {
-                        "__type": "CronExpression",
-                        "value": "2 2 * * *",
-                    },
+                    "timetable_summary": "2 2 * * *",
                     "tags": [],
                     "next_dagrun": None,
                     "has_task_concurrency_limits": True,
@@ -1126,13 +1119,8 @@ class TestGetDags(TestDagEndpoint):
                     "file_token": file_token,
                     "is_paused": False,
                     "is_active": True,
-                    "is_subdag": False,
                     "owners": [],
-                    "root_dag_id": None,
-                    "schedule_interval": {
-                        "__type": "CronExpression",
-                        "value": "2 2 * * *",
-                    },
+                    "timetable_summary": "2 2 * * *",
                     "tags": [],
                     "next_dagrun": None,
                     "has_task_concurrency_limits": True,
@@ -1171,13 +1159,8 @@ class TestGetDags(TestDagEndpoint):
                     "file_token": file_token,
                     "is_paused": True,
                     "is_active": True,
-                    "is_subdag": False,
                     "owners": [],
-                    "root_dag_id": None,
-                    "schedule_interval": {
-                        "__type": "CronExpression",
-                        "value": "2 2 * * *",
-                    },
+                    "timetable_summary": "2 2 * * *",
                     "tags": [],
                     "next_dagrun": None,
                     "has_task_concurrency_limits": True,
@@ -1204,13 +1187,8 @@ class TestGetDags(TestDagEndpoint):
                     "file_token": file_token,
                     "is_paused": False,
                     "is_active": True,
-                    "is_subdag": False,
                     "owners": [],
-                    "root_dag_id": None,
-                    "schedule_interval": {
-                        "__type": "CronExpression",
-                        "value": "2 2 * * *",
-                    },
+                    "timetable_summary": "2 2 * * *",
                     "tags": [],
                     "next_dagrun": None,
                     "has_task_concurrency_limits": True,
@@ -1259,6 +1237,22 @@ class TestGetDags(TestDagEndpoint):
 
         assert response.status_code == 400, f"Current code: {response.status_code}"
 
+    @pytest.mark.parametrize(
+        "set_auto_role_public, expected_status_code",
+        (("Public", 403), ("Admin", 200)),
+        indirect=["set_auto_role_public"],
+    )
+    def test_with_auth_role_public_set(self, set_auto_role_public, expected_status_code, session):
+        self._create_dag_models(2)
+        self._create_deactivated_dag()
+
+        dags_query = session.query(DagModel)
+        assert len(dags_query.all()) == 3
+
+        response = self.client.get("api/v1/dags")
+
+        assert response.status_code == expected_status_code
+
 
 class TestPatchDag(TestDagEndpoint):
     def test_should_respond_200_on_patch_is_paused(self, url_safe_serializer, session):
@@ -1279,13 +1273,8 @@ class TestPatchDag(TestDagEndpoint):
             "file_token": file_token,
             "is_paused": False,
             "is_active": False,
-            "is_subdag": False,
             "owners": [],
-            "root_dag_id": None,
-            "schedule_interval": {
-                "__type": "CronExpression",
-                "value": "2 2 * * *",
-            },
+            "timetable_summary": "2 2 * * *",
             "tags": [],
             "next_dagrun": None,
             "has_task_concurrency_limits": True,
@@ -1324,16 +1313,13 @@ class TestPatchDag(TestDagEndpoint):
     def test_should_respond_400_on_invalid_request(self):
         patch_body = {
             "is_paused": True,
-            "schedule_interval": {
-                "__type": "CronExpression",
-                "value": "1 1 * * *",
-            },
+            "timetable_summary": "1 1 * * *",
         }
         dag_model = self._create_dag_model()
         response = self.client.patch(f"/api/v1/dags/{dag_model.dag_id}", json=patch_body)
         assert response.status_code == 400
         assert response.json == {
-            "detail": "Property is read-only - 'schedule_interval'",
+            "detail": "Property is read-only - 'timetable_summary'",
             "status": 400,
             "title": "Bad Request",
             "type": EXCEPTIONS_LINK_MAP[400],
@@ -1379,7 +1365,7 @@ class TestPatchDag(TestDagEndpoint):
     @provide_session
     def _create_dag_model(self, session=None):
         dag_model = DagModel(
-            dag_id="TEST_DAG_1", fileloc="/tmp/dag_1.py", schedule_interval="2 2 * * *", is_paused=True
+            dag_id="TEST_DAG_1", fileloc="/tmp/dag_1.py", timetable_summary="2 2 * * *", is_paused=True
         )
         session.add(dag_model)
         return dag_model
@@ -1416,13 +1402,8 @@ class TestPatchDag(TestDagEndpoint):
             "file_token": file_token,
             "is_paused": False,
             "is_active": False,
-            "is_subdag": False,
             "owners": [],
-            "root_dag_id": None,
-            "schedule_interval": {
-                "__type": "CronExpression",
-                "value": "2 2 * * *",
-            },
+            "timetable_summary": "2 2 * * *",
             "tags": [],
             "next_dagrun": None,
             "has_task_concurrency_limits": True,
@@ -1457,7 +1438,7 @@ class TestPatchDag(TestDagEndpoint):
                 {
                     "is_paused": True,
                 },
-                "update_mask=schedule_interval, description",
+                "update_mask=timetable_summary, description",
                 "Only `is_paused` field can be updated through the REST API",
             ),
         ],
@@ -1485,6 +1466,24 @@ class TestPatchDag(TestDagEndpoint):
 
         assert response.status_code == 403
 
+    @pytest.mark.parametrize(
+        "set_auto_role_public, expected_status_code",
+        (("Public", 403), ("Admin", 200)),
+        indirect=["set_auto_role_public"],
+    )
+    def test_with_auth_role_public_set(
+        self, set_auto_role_public, expected_status_code, url_safe_serializer, session
+    ):
+        url_safe_serializer.dumps("/tmp/dag_1.py")
+        dag_model = self._create_dag_model()
+        payload = {"is_paused": False}
+        response = self.client.patch(
+            f"/api/v1/dags/{dag_model.dag_id}",
+            json=payload,
+        )
+
+        assert response.status_code == expected_status_code
+
 
 class TestPatchDags(TestDagEndpoint):
     @provide_session
@@ -1494,7 +1493,7 @@ class TestPatchDags(TestDagEndpoint):
         self._create_dag_models(2)
         self._create_deactivated_dag()
 
-        dags_query = session.query(DagModel).filter(~DagModel.is_subdag)
+        dags_query = session.query(DagModel)
         assert len(dags_query.all()) == 3
 
         response = self.client.patch(
@@ -1516,13 +1515,8 @@ class TestPatchDags(TestDagEndpoint):
                     "file_token": file_token,
                     "is_paused": False,
                     "is_active": True,
-                    "is_subdag": False,
                     "owners": [],
-                    "root_dag_id": None,
-                    "schedule_interval": {
-                        "__type": "CronExpression",
-                        "value": "2 2 * * *",
-                    },
+                    "timetable_summary": "2 2 * * *",
                     "tags": [],
                     "next_dagrun": None,
                     "has_task_concurrency_limits": True,
@@ -1549,13 +1543,8 @@ class TestPatchDags(TestDagEndpoint):
                     "file_token": file_token2,
                     "is_paused": False,
                     "is_active": True,
-                    "is_subdag": False,
                     "owners": [],
-                    "root_dag_id": None,
-                    "schedule_interval": {
-                        "__type": "CronExpression",
-                        "value": "2 2 * * *",
-                    },
+                    "timetable_summary": "2 2 * * *",
                     "tags": [],
                     "next_dagrun": None,
                     "has_task_concurrency_limits": True,
@@ -1585,7 +1574,7 @@ class TestPatchDags(TestDagEndpoint):
         self._create_dag_models(2)
         self._create_deactivated_dag()
 
-        dags_query = session.query(DagModel).filter(~DagModel.is_subdag)
+        dags_query = session.query(DagModel)
         assert len(dags_query.all()) == 3
 
         response = self.client.patch(
@@ -1607,13 +1596,8 @@ class TestPatchDags(TestDagEndpoint):
                     "file_token": file_token,
                     "is_paused": False,
                     "is_active": True,
-                    "is_subdag": False,
                     "owners": [],
-                    "root_dag_id": None,
-                    "schedule_interval": {
-                        "__type": "CronExpression",
-                        "value": "2 2 * * *",
-                    },
+                    "timetable_summary": "2 2 * * *",
                     "tags": [],
                     "next_dagrun": None,
                     "has_task_concurrency_limits": True,
@@ -1640,13 +1624,8 @@ class TestPatchDags(TestDagEndpoint):
                     "file_token": file_token2,
                     "is_paused": False,
                     "is_active": True,
-                    "is_subdag": False,
                     "owners": [],
-                    "root_dag_id": None,
-                    "schedule_interval": {
-                        "__type": "CronExpression",
-                        "value": "2 2 * * *",
-                    },
+                    "timetable_summary": "2 2 * * *",
                     "tags": [],
                     "next_dagrun": None,
                     "has_task_concurrency_limits": True,
@@ -1674,7 +1653,7 @@ class TestPatchDags(TestDagEndpoint):
         self._create_dag_models(2)
         self._create_deactivated_dag()
 
-        dags_query = session.query(DagModel).filter(~DagModel.is_subdag)
+        dags_query = session.query(DagModel)
         assert len(dags_query.all()) == 3
 
         response = self.client.patch(
@@ -1697,7 +1676,7 @@ class TestPatchDags(TestDagEndpoint):
         self._create_dag_models(2)
         self._create_deactivated_dag()
 
-        dags_query = session.query(DagModel).filter(~DagModel.is_subdag)
+        dags_query = session.query(DagModel)
         assert len(dags_query.all()) == 3
 
         response = self.client.patch(
@@ -1738,13 +1717,8 @@ class TestPatchDags(TestDagEndpoint):
                     "file_token": file_token,
                     "is_paused": False,
                     "is_active": True,
-                    "is_subdag": False,
                     "owners": [],
-                    "root_dag_id": None,
-                    "schedule_interval": {
-                        "__type": "CronExpression",
-                        "value": "2 2 * * *",
-                    },
+                    "timetable_summary": "2 2 * * *",
                     "tags": [],
                     "next_dagrun": None,
                     "has_task_concurrency_limits": True,
@@ -1792,13 +1766,8 @@ class TestPatchDags(TestDagEndpoint):
                     "file_token": file_token,
                     "is_paused": False,
                     "is_active": True,
-                    "is_subdag": False,
                     "owners": [],
-                    "root_dag_id": None,
-                    "schedule_interval": {
-                        "__type": "CronExpression",
-                        "value": "2 2 * * *",
-                    },
+                    "timetable_summary": "2 2 * * *",
                     "tags": [],
                     "next_dagrun": None,
                     "has_task_concurrency_limits": True,
@@ -1825,13 +1794,8 @@ class TestPatchDags(TestDagEndpoint):
                     "file_token": file_token_2,
                     "is_paused": False,
                     "is_active": False,
-                    "is_subdag": False,
                     "owners": [],
-                    "root_dag_id": None,
-                    "schedule_interval": {
-                        "__type": "CronExpression",
-                        "value": "2 2 * * *",
-                    },
+                    "timetable_summary": "2 2 * * *",
                     "tags": [],
                     "next_dagrun": None,
                     "has_task_concurrency_limits": True,
@@ -1866,10 +1830,10 @@ class TestPatchDags(TestDagEndpoint):
     )
     def test_filter_dags_by_tags_works(self, url, expected_dag_ids):
         # test filter by tags
-        dag1 = DAG(dag_id="TEST_DAG_1", tags=["t1"])
-        dag2 = DAG(dag_id="TEST_DAG_2", tags=["t2"])
-        dag3 = DAG(dag_id="TEST_DAG_3", tags=["t1", "t2"])
-        dag4 = DAG(dag_id="TEST_DAG_4")
+        dag1 = DAG(dag_id="TEST_DAG_1", schedule=None, tags=["t1"])
+        dag2 = DAG(dag_id="TEST_DAG_2", schedule=None, tags=["t2"])
+        dag3 = DAG(dag_id="TEST_DAG_3", schedule=None, tags=["t1", "t2"])
+        dag4 = DAG(dag_id="TEST_DAG_4", schedule=None)
         dag1.sync_to_db()
         dag2.sync_to_db()
         dag3.sync_to_db()
@@ -1899,10 +1863,10 @@ class TestPatchDags(TestDagEndpoint):
     )
     def test_filter_dags_by_dag_id_works(self, url, expected_dag_ids):
         # test filter by tags
-        dag1 = DAG(dag_id="TEST_DAG_1")
-        dag2 = DAG(dag_id="TEST_DAG_2")
-        dag3 = DAG(dag_id="SAMPLE_DAG_1")
-        dag4 = DAG(dag_id="SAMPLE_DAG_2")
+        dag1 = DAG(dag_id="TEST_DAG_1", schedule=None)
+        dag2 = DAG(dag_id="TEST_DAG_2", schedule=None)
+        dag3 = DAG(dag_id="SAMPLE_DAG_1", schedule=None)
+        dag4 = DAG(dag_id="SAMPLE_DAG_2", schedule=None)
         dag1.sync_to_db()
         dag2.sync_to_db()
         dag3.sync_to_db()
@@ -2042,13 +2006,8 @@ class TestPatchDags(TestDagEndpoint):
                     "file_token": file_token,
                     "is_paused": True,
                     "is_active": True,
-                    "is_subdag": False,
                     "owners": [],
-                    "root_dag_id": None,
-                    "schedule_interval": {
-                        "__type": "CronExpression",
-                        "value": "2 2 * * *",
-                    },
+                    "timetable_summary": "2 2 * * *",
                     "tags": [],
                     "next_dagrun": None,
                     "has_task_concurrency_limits": True,
@@ -2075,13 +2034,8 @@ class TestPatchDags(TestDagEndpoint):
                     "file_token": file_token2,
                     "is_paused": True,
                     "is_active": True,
-                    "is_subdag": False,
                     "owners": [],
-                    "root_dag_id": None,
-                    "schedule_interval": {
-                        "__type": "CronExpression",
-                        "value": "2 2 * * *",
-                    },
+                    "timetable_summary": "2 2 * * *",
                     "tags": [],
                     "next_dagrun": None,
                     "has_task_concurrency_limits": True,
@@ -2129,13 +2083,8 @@ class TestPatchDags(TestDagEndpoint):
                     "file_token": file_token,
                     "is_paused": True,
                     "is_active": True,
-                    "is_subdag": False,
                     "owners": [],
-                    "root_dag_id": None,
-                    "schedule_interval": {
-                        "__type": "CronExpression",
-                        "value": "2 2 * * *",
-                    },
+                    "timetable_summary": "2 2 * * *",
                     "tags": [],
                     "next_dagrun": None,
                     "has_task_concurrency_limits": True,
@@ -2162,13 +2111,8 @@ class TestPatchDags(TestDagEndpoint):
                     "file_token": file_token10,
                     "is_paused": True,
                     "is_active": True,
-                    "is_subdag": False,
                     "owners": [],
-                    "root_dag_id": None,
-                    "schedule_interval": {
-                        "__type": "CronExpression",
-                        "value": "2 2 * * *",
-                    },
+                    "timetable_summary": "2 2 * * *",
                     "tags": [],
                     "next_dagrun": None,
                     "has_task_concurrency_limits": True,
@@ -2218,13 +2162,8 @@ class TestPatchDags(TestDagEndpoint):
                     "file_token": file_token10,
                     "is_paused": False,
                     "is_active": True,
-                    "is_subdag": False,
                     "owners": [],
-                    "root_dag_id": None,
-                    "schedule_interval": {
-                        "__type": "CronExpression",
-                        "value": "2 2 * * *",
-                    },
+                    "timetable_summary": "2 2 * * *",
                     "tags": [],
                     "next_dagrun": None,
                     "has_task_concurrency_limits": True,
@@ -2251,13 +2190,8 @@ class TestPatchDags(TestDagEndpoint):
                     "file_token": file_token,
                     "is_paused": False,
                     "is_active": True,
-                    "is_subdag": False,
                     "owners": [],
-                    "root_dag_id": None,
-                    "schedule_interval": {
-                        "__type": "CronExpression",
-                        "value": "2 2 * * *",
-                    },
+                    "timetable_summary": "2 2 * * *",
                     "tags": [],
                     "next_dagrun": None,
                     "has_task_concurrency_limits": True,
@@ -2290,6 +2224,29 @@ class TestPatchDags(TestDagEndpoint):
             environ_overrides={"REMOTE_USER": "test"},
         )
         assert response.status_code == 400
+
+    @pytest.mark.parametrize(
+        "set_auto_role_public, expected_status_code",
+        (("Public", 403), ("Admin", 200)),
+        indirect=["set_auto_role_public"],
+    )
+    def test_with_auth_role_public_set(
+        self, set_auto_role_public, expected_status_code, session, url_safe_serializer
+    ):
+        url_safe_serializer.dumps("/tmp/dag_1.py")
+        url_safe_serializer.dumps("/tmp/dag_2.py")
+        self._create_dag_models(2)
+        self._create_deactivated_dag()
+
+        dags_query = session.query(DagModel)
+        assert len(dags_query.all()) == 3
+
+        response = self.client.patch(
+            "/api/v1/dags?dag_id_pattern=~",
+            json={"is_paused": False},
+        )
+
+        assert response.status_code == expected_status_code
 
 
 class TestDeleteDagEndpoint(TestDagEndpoint):
@@ -2342,3 +2299,15 @@ class TestDeleteDagEndpoint(TestDagEndpoint):
             environ_overrides={"REMOTE_USER": "test_no_permissions"},
         )
         assert response.status_code == 403
+
+    @pytest.mark.parametrize(
+        "set_auto_role_public, expected_status_code",
+        (("Public", 403), ("Admin", 204)),
+        indirect=["set_auto_role_public"],
+    )
+    def test_with_auth_role_public_set(self, set_auto_role_public, expected_status_code):
+        self._create_dag_models(1)
+
+        response = self.client.delete("/api/v1/dags/TEST_DAG_1")
+
+        assert response.status_code == expected_status_code

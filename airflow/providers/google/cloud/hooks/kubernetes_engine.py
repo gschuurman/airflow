@@ -24,7 +24,6 @@ import json
 import time
 from typing import TYPE_CHECKING, Sequence
 
-from deprecated import deprecated
 from google.api_core.exceptions import NotFound
 from google.api_core.gapic_v1.method import DEFAULT, _MethodDefault
 from google.auth.transport import requests as google_requests
@@ -43,6 +42,7 @@ from airflow.exceptions import AirflowException, AirflowProviderDeprecationWarni
 from airflow.providers.cncf.kubernetes.hooks.kubernetes import AsyncKubernetesHook, KubernetesHook
 from airflow.providers.cncf.kubernetes.kube_client import _enable_tcp_keepalive
 from airflow.providers.google.common.consts import CLIENT_INFO
+from airflow.providers.google.common.deprecated import deprecated
 from airflow.providers.google.common.hooks.base_google import (
     PROVIDE_PROJECT_ID,
     GoogleBaseAsyncHook,
@@ -104,7 +104,8 @@ class GKEClusterConnection:
 
 
 class GKEHook(GoogleBaseHook):
-    """Google Kubernetes Engine cluster APIs.
+    """
+    Google Kubernetes Engine cluster APIs.
 
     All the methods in the hook where project_id is used must be called with
     keyword arguments rather than positional.
@@ -138,10 +139,8 @@ class GKEHook(GoogleBaseHook):
     # To preserve backward compatibility
     # TODO: remove one day
     @deprecated(
-        reason=(
-            "The get_conn method has been deprecated. "
-            "You should use the get_cluster_manager_client method."
-        ),
+        planned_removal_date="November 01, 2024",
+        use_instead="get_cluster_manager_client",
         category=AirflowProviderDeprecationWarning,
     )
     def get_conn(self) -> container_v1.ClusterManagerClient:
@@ -150,14 +149,16 @@ class GKEHook(GoogleBaseHook):
     # To preserve backward compatibility
     # TODO: remove one day
     @deprecated(
-        reason="The get_client method has been deprecated. You should use the get_conn method.",
+        planned_removal_date="November 01, 2024",
+        use_instead="get_cluster_manager_client",
         category=AirflowProviderDeprecationWarning,
     )
     def get_client(self) -> ClusterManagerClient:
         return self.get_conn()
 
-    def wait_for_operation(self, operation: Operation, project_id: str | None = None) -> Operation:
-        """Continuously fetch the status from Google Cloud.
+    def wait_for_operation(self, operation: Operation, project_id: str = PROVIDE_PROJECT_ID) -> Operation:
+        """
+        Continuously fetch the status from Google Cloud.
 
         This is done until the given operation completes, or raises an error.
 
@@ -176,8 +177,9 @@ class GKEHook(GoogleBaseHook):
             operation = self.get_operation(operation.name, project_id=project_id or self.project_id)
         return operation
 
-    def get_operation(self, operation_name: str, project_id: str | None = None) -> Operation:
-        """Get an operation from Google Cloud.
+    def get_operation(self, operation_name: str, project_id: str = PROVIDE_PROJECT_ID) -> Operation:
+        """
+        Get an operation from Google Cloud.
 
         :param operation_name: Name of operation to fetch
         :param project_id: Google Cloud project ID
@@ -192,7 +194,8 @@ class GKEHook(GoogleBaseHook):
 
     @staticmethod
     def _append_label(cluster_proto: Cluster, key: str, val: str) -> Cluster:
-        """Append labels to provided Cluster Protobuf.
+        """
+        Append labels to provided Cluster Protobuf.
 
         Labels must fit the regex ``[a-z]([-a-z0-9]*[a-z0-9])?`` (current
          airflow version string follows semantic versioning spec: x.y.z).
@@ -216,7 +219,8 @@ class GKEHook(GoogleBaseHook):
         retry: Retry | _MethodDefault = DEFAULT,
         timeout: float | None = None,
     ) -> Operation | None:
-        """Delete the cluster, the Kubernetes endpoint, and all worker nodes.
+        """
+        Delete the cluster, the Kubernetes endpoint, and all worker nodes.
 
         Firewalls and routes that were configured during cluster creation are
         also deleted. Other Google Compute Engine resources that might be in use
@@ -259,7 +263,8 @@ class GKEHook(GoogleBaseHook):
         retry: Retry | _MethodDefault = DEFAULT,
         timeout: float | None = None,
     ) -> Operation | Cluster:
-        """Create a cluster.
+        """
+        Create a cluster.
 
         This should consist of the specified number, and the type of Google
         Compute Engine instances.
@@ -314,7 +319,8 @@ class GKEHook(GoogleBaseHook):
         retry: Retry | _MethodDefault = DEFAULT,
         timeout: float | None = None,
     ) -> Cluster:
-        """Get details of specified cluster.
+        """
+        Get details of specified cluster.
 
         :param name: The name of the cluster to retrieve.
         :param project_id: Google Cloud project ID.
@@ -404,7 +410,8 @@ class GKEAsyncHook(GoogleBaseAsyncHook):
         operation_name: str,
         project_id: str = PROVIDE_PROJECT_ID,
     ) -> Operation:
-        """Fetch an operation from Google Cloud.
+        """
+        Fetch an operation from Google Cloud.
 
         :param operation_name: Name of operation to fetch.
         :param project_id: Google Cloud project ID.
@@ -420,7 +427,8 @@ class GKEAsyncHook(GoogleBaseAsyncHook):
 
 
 class GKEKubernetesHook(GoogleBaseHook, KubernetesHook):
-    """GKE authenticated hook for standard Kubernetes API.
+    """
+    GKE authenticated hook for standard Kubernetes API.
 
     This hook provides full set of the standard Kubernetes API provided by the KubernetesHook,
     and at the same time it provides a GKE authentication, so it makes it possible to KubernetesHook
@@ -506,7 +514,8 @@ class GKEKubernetesHook(GoogleBaseHook, KubernetesHook):
 
 
 class GKEKubernetesAsyncHook(GoogleBaseAsyncHook, AsyncKubernetesHook):
-    """Async GKE authenticated hook for standard Kubernetes API.
+    """
+    Async GKE authenticated hook for standard Kubernetes API.
 
     This hook provides full set of the standard Kubernetes API provided by the AsyncKubernetesHook,
     and at the same time it provides a GKE authentication, so it makes it possible to KubernetesHook
@@ -570,10 +579,8 @@ class GKEKubernetesAsyncHook(GoogleBaseAsyncHook, AsyncKubernetesHook):
 
 
 @deprecated(
-    reason=(
-        "The `GKEDeploymentHook` class is deprecated and will be removed after 01.10.2024, please use "
-        "`GKEKubernetesHook` instead."
-    ),
+    planned_removal_date="October 01, 2024",
+    use_instead="GKEKubernetesHook",
     category=AirflowProviderDeprecationWarning,
 )
 class GKEDeploymentHook(GKEKubernetesHook):
@@ -581,10 +588,8 @@ class GKEDeploymentHook(GKEKubernetesHook):
 
 
 @deprecated(
-    reason=(
-        "The `GKECustomResourceHook` class is deprecated and will be removed after 01.10.2024, please use "
-        "`GKEKubernetesHook` instead."
-    ),
+    planned_removal_date="October 01, 2024",
+    use_instead="GKEKubernetesHook",
     category=AirflowProviderDeprecationWarning,
 )
 class GKECustomResourceHook(GKEKubernetesHook):
@@ -592,10 +597,8 @@ class GKECustomResourceHook(GKEKubernetesHook):
 
 
 @deprecated(
-    reason=(
-        "The `GKEPodHook` class is deprecated and will be removed after 01.10.2024, please use "
-        "`GKEKubernetesHook` instead."
-    ),
+    planned_removal_date="October 01, 2024",
+    use_instead="GKEKubernetesHook",
     category=AirflowProviderDeprecationWarning,
 )
 class GKEPodHook(GKEKubernetesHook):
@@ -621,10 +624,8 @@ class GKEPodHook(GKEKubernetesHook):
 
 
 @deprecated(
-    reason=(
-        "The `GKEJobHook` class is deprecated and will be removed after 01.10.2024, please use "
-        "`GKEKubernetesHook` instead."
-    ),
+    planned_removal_date="October 01, 2024",
+    use_instead="GKEKubernetesHook",
     category=AirflowProviderDeprecationWarning,
 )
 class GKEJobHook(GKEKubernetesHook):
@@ -632,14 +633,13 @@ class GKEJobHook(GKEKubernetesHook):
 
 
 @deprecated(
-    reason=(
-        "The `GKEPodAsyncHook` class is deprecated and will be removed after 01.10.2024, please use "
-        "`GKEKubernetesAsyncHook` instead."
-    ),
+    planned_removal_date="October 01, 2024",
+    use_instead="GKEKubernetesAsyncHook",
     category=AirflowProviderDeprecationWarning,
 )
 class GKEPodAsyncHook(GKEKubernetesAsyncHook):
-    """Google Kubernetes Engine pods APIs asynchronously.
+    """
+    Google Kubernetes Engine pods APIs asynchronously.
 
     :param cluster_url: The URL pointed to the cluster.
     :param ssl_ca_cert: SSL certificate used for authentication to the pod.

@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
 # distributed with this work for additional information
@@ -27,11 +28,12 @@ from common_precommit_utils import console, initialize_breeze_precommit
 initialize_breeze_precommit(__name__, __file__)
 
 POSSIBLE_TEST_FOLDERS = [
+    "_internals",
     "always",
     "api",
     "api_connexion",
-    "api_experimental",
     "api_internal",
+    "api_fastapi",
     "auth",
     "callbacks",
     "charts",

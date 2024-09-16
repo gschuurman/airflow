@@ -28,6 +28,7 @@ from airflow.providers.amazon.aws.operators.emr import (
     EmrStartNotebookExecutionOperator,
     EmrStopNotebookExecutionOperator,
 )
+from tests.providers.amazon.aws.utils.test_template_fields import validate_template_fields
 from tests.providers.amazon.aws.utils.test_waiter import assert_expected_waiter_type
 
 PARAMS = {
@@ -284,15 +285,15 @@ class TestStopEmrNotebookExecutionOperator:
     @mock.patch.object(EmrHook, "conn")
     def test_stop_notebook_execution_waiter_config(self, mock_conn, mock_waiter, _):
         test_execution_id = "test-execution-id"
-        countdown = 400
+        waiter_max_attempts = 35
         delay = 12
 
         op = EmrStopNotebookExecutionOperator(
             task_id="test-id",
             notebook_execution_id=test_execution_id,
             wait_for_completion=True,
-            waiter_countdown=countdown,
-            waiter_check_interval_seconds=delay,
+            waiter_max_attempts=waiter_max_attempts,
+            waiter_delay=delay,
         )
 
         op.execute(None)
@@ -300,6 +301,23 @@ class TestStopEmrNotebookExecutionOperator:
         mock_waiter.assert_called_once_with(
             mock.ANY,
             NotebookExecutionId=test_execution_id,
-            WaiterConfig={"Delay": delay, "MaxAttempts": countdown // delay},
+            WaiterConfig={"Delay": delay, "MaxAttempts": waiter_max_attempts},
         )
         assert_expected_waiter_type(mock_waiter, "notebook_stopped")
+
+    def test_template_fields(self):
+        op = EmrStartNotebookExecutionOperator(
+            task_id="test-id",
+            editor_id=PARAMS["EditorId"],
+            relative_path=PARAMS["RelativePath"],
+            cluster_id=PARAMS["ExecutionEngine"]["Id"],
+            service_role=PARAMS["ServiceRole"],
+            notebook_execution_name=PARAMS["NotebookExecutionName"],
+            notebook_params=PARAMS["NotebookParams"],
+            notebook_instance_security_group_id=PARAMS["NotebookInstanceSecurityGroupId"],
+            master_instance_security_group_id=PARAMS["ExecutionEngine"]["MasterInstanceSecurityGroupId"],
+            tags=PARAMS["Tags"],
+            wait_for_completion=True,
+        )
+
+        validate_template_fields(op)

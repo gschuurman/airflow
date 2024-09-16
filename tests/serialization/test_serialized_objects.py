@@ -19,16 +19,26 @@ from __future__ import annotations
 
 import inspect
 import json
+import warnings
 from datetime import datetime, timedelta
 from importlib import import_module
+from typing import Iterator
 
+import pendulum
 import pytest
 from dateutil import relativedelta
 from kubernetes.client import models as k8s
 from pendulum.tz.timezone import Timezone
+from pydantic import BaseModel
 
-from airflow.datasets import Dataset
-from airflow.exceptions import SerializationError
+from airflow.datasets import Dataset, DatasetAlias, DatasetAliasEvent
+from airflow.exceptions import (
+    AirflowException,
+    AirflowFailException,
+    AirflowRescheduleException,
+    SerializationError,
+    TaskDeferred,
+)
 from airflow.jobs.job import Job
 from airflow.models.connection import Connection
 from airflow.models.dag import DAG, DagModel, DagTag
@@ -49,9 +59,11 @@ from airflow.serialization.pydantic.taskinstance import TaskInstancePydantic
 from airflow.serialization.pydantic.tasklog import LogTemplatePydantic
 from airflow.serialization.serialized_objects import BaseSerialization
 from airflow.settings import _ENABLE_AIP_44
+from airflow.triggers.base import BaseTrigger
 from airflow.utils import timezone
+from airflow.utils.context import OutletEventAccessor, OutletEventAccessors
+from airflow.utils.db import LazySelectSequence
 from airflow.utils.operator_resources import Resources
-from airflow.utils.pydantic import BaseModel
 from airflow.utils.state import DagRunState, State
 from airflow.utils.task_group import TaskGroup
 from airflow.utils.types import DagRunType
@@ -63,6 +75,7 @@ def test_recursive_serialize_calls_must_forward_kwargs():
     import ast
 
     valid_recursive_call_count = 0
+    skipped_recursive_calls = 0  # when another serialize method called
     file = REPO_ROOT / "airflow/serialization/serialized_objects.py"
     content = file.read_text()
     tree = ast.parse(content)
@@ -78,9 +91,11 @@ def test_recursive_serialize_calls_must_forward_kwargs():
             method_def = elem
             break
     kwonly_args = [x.arg for x in method_def.args.kwonlyargs]
-
     for elem in ast.walk(method_def):
         if isinstance(elem, ast.Call) and getattr(elem.func, "attr", "") == "serialize":
+            if not elem.func.value.id == "cls":
+                skipped_recursive_calls += 1
+                break
             kwargs = {y.arg: y.value for y in elem.keywords}
             for name in kwonly_args:
                 if name not in kwargs or getattr(kwargs[name], "id", "") != name:
@@ -93,6 +108,7 @@ def test_recursive_serialize_calls_must_forward_kwargs():
                 valid_recursive_call_count += 1
     print(f"validated calls: {valid_recursive_call_count}")
     assert valid_recursive_call_count > 0
+    assert skipped_recursive_calls == 1
 
 
 def test_strict_mode():
@@ -140,6 +156,27 @@ def equals(a, b) -> bool:
 
 def equal_time(a: datetime, b: datetime) -> bool:
     return a.strftime("%s") == b.strftime("%s")
+
+
+def equal_exception(a: AirflowException, b: AirflowException) -> bool:
+    return a.__class__ == b.__class__ and str(a) == str(b)
+
+
+def equal_outlet_event_accessor(a: OutletEventAccessor, b: OutletEventAccessor) -> bool:
+    return a.raw_key == b.raw_key and a.extra == b.extra and a.dataset_alias_events == b.dataset_alias_events
+
+
+class MockLazySelectSequence(LazySelectSequence):
+    _data = ["a", "b", "c"]
+
+    def __init__(self):
+        super().__init__(None, None, session="MockSession")
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._data)
+
+    def __len__(self) -> int:
+        return len(self._data)
 
 
 @pytest.mark.parametrize(
@@ -194,12 +231,44 @@ def equal_time(a: datetime, b: datetime) -> bool:
             DAT.XCOM_REF,
             None,
         ),
+        (MockLazySelectSequence(), None, lambda a, b: len(a) == len(b) and isinstance(b, list)),
         (Dataset(uri="test"), DAT.DATASET, equals),
         (SimpleTaskInstance.from_ti(ti=TI), DAT.SIMPLE_TASK_INSTANCE, equals),
         (
             Connection(conn_id="TEST_ID", uri="mysql://"),
             DAT.CONNECTION,
             lambda a, b: a.get_uri() == b.get_uri(),
+        ),
+        (
+            OutletEventAccessor(raw_key=Dataset(uri="test"), extra={"key": "value"}, dataset_alias_events=[]),
+            DAT.DATASET_EVENT_ACCESSOR,
+            equal_outlet_event_accessor,
+        ),
+        (
+            OutletEventAccessor(
+                raw_key=DatasetAlias(name="test_alias"),
+                extra={"key": "value"},
+                dataset_alias_events=[
+                    DatasetAliasEvent(source_alias_name="test_alias", dest_dataset_uri="test_uri", extra={})
+                ],
+            ),
+            DAT.DATASET_EVENT_ACCESSOR,
+            equal_outlet_event_accessor,
+        ),
+        (
+            OutletEventAccessor(raw_key="test", extra={"key": "value"}, dataset_alias_events=[]),
+            DAT.DATASET_EVENT_ACCESSOR,
+            equal_outlet_event_accessor,
+        ),
+        (
+            AirflowException("test123 wohoo!"),
+            DAT.AIRFLOW_EXC_SER,
+            equal_exception,
+        ),
+        (
+            AirflowFailException("uuups, failed :-("),
+            DAT.AIRFLOW_EXC_SER,
+            equal_exception,
         ),
     ],
 )
@@ -250,7 +319,7 @@ sample_objects = {
     DagModelPydantic: DagModel(
         dag_id="TEST_DAG_1",
         fileloc="/tmp/dag_1.py",
-        schedule_interval="2 2 * * *",
+        timetable_summary="2 2 * * *",
         is_paused=True,
     ),
     LogTemplatePydantic: LogTemplate(
@@ -299,7 +368,7 @@ sample_objects = {
             sample_objects.get(DagModelPydantic),
             DagModelPydantic,
             DAT.DAG_MODEL,
-            lambda a, b: a.fileloc == b.fileloc and a.schedule_interval == b.schedule_interval,
+            lambda a, b: a.fileloc == b.fileloc and a.timetable_summary == b.timetable_summary,
         ),
         (
             sample_objects.get(LogTemplatePydantic),
@@ -311,28 +380,36 @@ sample_objects = {
 )
 def test_serialize_deserialize_pydantic(input, pydantic_class, encoded_type, cmp_func):
     """If use_pydantic_models=True the objects should be serialized to Pydantic objects."""
-    pytest.importorskip("pydantic", minversion="2.0.0")
+    pydantic = pytest.importorskip("pydantic", minversion="2.0.0")
 
     from airflow.serialization.serialized_objects import BaseSerialization
 
-    serialized = BaseSerialization.serialize(input, use_pydantic_models=True)  # does not raise
-    # Verify the result is JSON-serializable
-    json.dumps(serialized)  # does not raise
-    assert serialized["__type"] == encoded_type
-    assert serialized["__var"] is not None
-    deserialized = BaseSerialization.deserialize(serialized, use_pydantic_models=True)
-    assert isinstance(deserialized, pydantic_class)
-    assert cmp_func(input, deserialized)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", category=pydantic.warnings.PydanticDeprecationWarning)
 
-    # verify that when we round trip a pydantic model we get the same thing
-    reserialized = BaseSerialization.serialize(deserialized, use_pydantic_models=True)
-    dereserialized = BaseSerialization.deserialize(reserialized, use_pydantic_models=True)
-    assert isinstance(dereserialized, pydantic_class)
-    assert dereserialized == deserialized
+        serialized = BaseSerialization.serialize(input, use_pydantic_models=True)  # does not raise
+        # Verify the result is JSON-serializable
+        json.dumps(serialized)  # does not raise
+        assert serialized["__type"] == encoded_type
+        assert serialized["__var"] is not None
+        deserialized = BaseSerialization.deserialize(serialized, use_pydantic_models=True)
+        assert isinstance(deserialized, pydantic_class)
+        assert cmp_func(input, deserialized)
 
-    # Verify recursive behavior
-    obj = [[input]]
-    BaseSerialization.serialize(obj, use_pydantic_models=True)  # does not raise
+        # verify that when we round trip a pydantic model we get the same thing
+        reserialized = BaseSerialization.serialize(deserialized, use_pydantic_models=True)
+        dereserialized = BaseSerialization.deserialize(reserialized, use_pydantic_models=True)
+        assert isinstance(dereserialized, pydantic_class)
+
+        if encoded_type == "task_instance":
+            deserialized.task.dag = None
+            dereserialized.task.dag = None
+
+        assert dereserialized == deserialized
+
+        # Verify recursive behavior
+        obj = [[input]]
+        BaseSerialization.serialize(obj, use_pydantic_models=True)  # does not raise
 
 
 def test_all_pydantic_models_round_trip():
@@ -346,7 +423,7 @@ def test_all_pydantic_models_round_trip():
             continue
         relpath = str(p.relative_to(REPO_ROOT).stem)
         mod = import_module(f"airflow.serialization.pydantic.{relpath}")
-        for name, obj in inspect.getmembers(mod):
+        for _, obj in inspect.getmembers(mod):
             if inspect.isclass(obj) and issubclass(obj, BaseModel):
                 if obj == BaseModel:
                     continue
@@ -358,6 +435,7 @@ def test_all_pydantic_models_round_trip():
         "TaskOutletDatasetReferencePydantic",
         "DagOwnerAttributesPydantic",
         "DatasetEventPydantic",
+        "TriggerPydantic",
     }
     for c in sorted(classes, key=str):
         if c.__name__ in exclusion_list:
@@ -383,6 +461,10 @@ def test_all_pydantic_models_round_trip():
         serialized = BaseSerialization.serialize(pydantic_instance, use_pydantic_models=True)
         deserialized = BaseSerialization.deserialize(serialized, use_pydantic_models=True)
         assert isinstance(deserialized, c)
+        if isinstance(pydantic_instance, TaskInstancePydantic):
+            # we can't access the dag on deserialization; but there is no dag here.
+            deserialized.task.dag = None
+            pydantic_instance.task.dag = None
         assert pydantic_instance == deserialized
 
 
@@ -406,3 +488,50 @@ def test_serialized_mapped_operator_unmap(dag_maker):
 
     serialized_unmapped_task = serialized_task2.unmap(None)
     assert serialized_unmapped_task.dag is serialized_dag
+
+
+def test_ser_of_dataset_event_accessor():
+    # todo: (Airflow 3.0) we should force reserialization on upgrade
+    d = OutletEventAccessors()
+    d["hi"].extra = "blah1"  # todo: this should maybe be forbidden?  i.e. can extra be any json or just dict?
+    d["yo"].extra = {"this": "that", "the": "other"}
+    ser = BaseSerialization.serialize(var=d)
+    deser = BaseSerialization.deserialize(ser)
+    assert deser["hi"].extra == "blah1"
+    assert d["yo"].extra == {"this": "that", "the": "other"}
+
+
+class MyTrigger(BaseTrigger):
+    def __init__(self, hi):
+        self.hi = hi
+
+    def serialize(self):
+        return "tests.serialization.test_serialized_objects.MyTrigger", {"hi": self.hi}
+
+    async def run(self):
+        yield
+
+
+def test_roundtrip_exceptions():
+    """This is for AIP-44 when we need to send certain non-error exceptions
+    as part of an RPC call e.g. TaskDeferred or AirflowRescheduleException."""
+    some_date = pendulum.now()
+    resched_exc = AirflowRescheduleException(reschedule_date=some_date)
+    ser = BaseSerialization.serialize(resched_exc)
+    deser = BaseSerialization.deserialize(ser)
+    assert isinstance(deser, AirflowRescheduleException)
+    assert deser.reschedule_date == some_date
+    del ser
+    del deser
+    exc = TaskDeferred(
+        trigger=MyTrigger(hi="yo"),
+        method_name="meth_name",
+        kwargs={"have": "pie"},
+        timeout=timedelta(seconds=30),
+    )
+    ser = BaseSerialization.serialize(exc)
+    deser = BaseSerialization.deserialize(ser)
+    assert deser.trigger.hi == "yo"
+    assert deser.method_name == "meth_name"
+    assert deser.kwargs == {"have": "pie"}
+    assert deser.timeout == timedelta(seconds=30)

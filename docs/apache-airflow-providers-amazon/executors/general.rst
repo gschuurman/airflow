@@ -74,6 +74,17 @@ Then you can build your image by ``cd``-ing to the directory with the Dockerfile
    docker build -t my-airflow-image \
     --build-arg aws_default_region=YOUR_DEFAULT_REGION .
 
+Note: It is important that images are built and run under the same architecture. For example,
+for users on Apple Silicon, you may want to specify the arch using ``docker buildx``:
+
+.. code-block:: bash
+
+  docker buildx build --platform=linux/amd64 -t my-airflow-image \
+    --build-arg aws_default_region=YOUR_DEFAULT_REGION .
+
+See
+`here <https://docs.docker.com/reference/cli/docker/buildx/>`__ for more information
+about using ``docker buildx``.
 
 The second method is to use the build-time arguments
 (``aws_access_key_id``, ``aws_secret_access_key``,
@@ -315,7 +326,7 @@ Create an ECR Repository
 
 This script should be run on the host(s) running the Airflow Scheduler and Webserver, before those processes are started.
 
-The script sets environment variables that configure Airflow to use the Batch Executor and provide necessary information for task execution. Any other configuration changes made (such as for remote logging) should be added to this example script to keep configuration consistent across the Airflow environment.
+The script sets environment variables that configure Airflow to use the |executorName| Executor and provide necessary information for task execution. Any other configuration changes made (such as for remote logging) should be added to this example script to keep configuration consistent across the Airflow environment.
 
 Initialize the Airflow DB
 ~~~~~~~~~~~~~~~~~~~~~~~~~

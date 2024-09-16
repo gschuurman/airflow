@@ -29,6 +29,7 @@ from airflow.providers.amazon.aws.operators.lambda_function import (
     LambdaCreateFunctionOperator,
     LambdaInvokeFunctionOperator,
 )
+from tests.providers.amazon.aws.utils.test_template_fields import validate_template_fields
 
 FUNCTION_NAME = "function_name"
 PAYLOADS = [
@@ -124,6 +125,52 @@ class TestLambdaCreateFunctionOperator:
         )
         with pytest.raises(TaskDeferred):
             operator.execute(None)
+
+    @mock.patch.object(LambdaHook, "create_lambda")
+    @mock.patch.object(LambdaHook, "conn")
+    @pytest.mark.parametrize(
+        "config",
+        [
+            pytest.param(
+                {
+                    "architectures": ["arm64"],
+                    "logging_config": {"LogFormat": "Text", "LogGroup": "/custom/log-group/"},
+                    "snap_start": {"ApplyOn": "PublishedVersions"},
+                    "ephemeral_storage": {"Size": 1024},
+                },
+                id="with-config-argument",
+            ),
+        ],
+    )
+    def test_create_lambda_using_config_argument(self, mock_hook_conn, mock_hook_create_lambda, config):
+        operator = LambdaCreateFunctionOperator(
+            task_id="task_test",
+            function_name=FUNCTION_NAME,
+            role=ROLE_ARN,
+            code={
+                "ImageUri": IMAGE_URI,
+            },
+            config=config,
+        )
+        operator.execute(None)
+
+        mock_hook_create_lambda.assert_called_once()
+        mock_hook_conn.get_waiter.assert_not_called()
+        assert operator.config.get("logging_config") == config.get("logging_config")
+        assert operator.config.get("architectures") == config.get("architectures")
+        assert operator.config.get("snap_start") == config.get("snap_start")
+        assert operator.config.get("ephemeral_storage") == config.get("ephemeral_storage")
+
+    def test_template_fields(self):
+        operator = LambdaCreateFunctionOperator(
+            task_id="task_test",
+            function_name=FUNCTION_NAME,
+            role=ROLE_ARN,
+            code={
+                "ImageUri": IMAGE_URI,
+            },
+        )
+        validate_template_fields(operator)
 
 
 class TestLambdaInvokeFunctionOperator:
@@ -245,3 +292,10 @@ class TestLambdaInvokeFunctionOperator:
 
         with pytest.raises(ValueError):
             operator.execute(None)
+
+    def test_template_fields(self):
+        operator = LambdaInvokeFunctionOperator(
+            task_id="task_test",
+            function_name="a",
+        )
+        validate_template_fields(operator)

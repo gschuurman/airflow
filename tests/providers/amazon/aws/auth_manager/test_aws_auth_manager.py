@@ -23,22 +23,33 @@ import pytest
 from flask import Flask, session
 from flask_appbuilder.menu import MenuItem
 
-from airflow.auth.managers.models.resource_details import (
-    AccessView,
-    ConfigurationDetails,
-    ConnectionDetails,
-    DagAccessEntity,
-    DagDetails,
-    DatasetDetails,
-    PoolDetails,
-    VariableDetails,
-)
-from airflow.providers.amazon.aws.auth_manager.avp.entities import AvpEntities
-from airflow.providers.amazon.aws.auth_manager.avp.facade import AwsAuthManagerAmazonVerifiedPermissionsFacade
-from airflow.providers.amazon.aws.auth_manager.aws_auth_manager import AwsAuthManager
 from airflow.providers.amazon.aws.auth_manager.security_manager.aws_security_manager_override import (
     AwsSecurityManagerOverride,
 )
+from tests.test_utils.compat import AIRFLOW_V_2_8_PLUS, AIRFLOW_V_2_9_PLUS
+
+try:
+    from airflow.auth.managers.models.resource_details import (
+        AccessView,
+        ConfigurationDetails,
+        ConnectionDetails,
+        DagAccessEntity,
+        DagDetails,
+        DatasetDetails,
+        PoolDetails,
+        VariableDetails,
+    )
+except ImportError:
+    if not AIRFLOW_V_2_8_PLUS:
+        pytest.skip(
+            "Skipping tests that require airflow.auth.managers.models.resource_details for Airflow < 2.8.0",
+            allow_module_level=True,
+        )
+    else:
+        raise
+from airflow.providers.amazon.aws.auth_manager.avp.entities import AvpEntities
+from airflow.providers.amazon.aws.auth_manager.avp.facade import AwsAuthManagerAmazonVerifiedPermissionsFacade
+from airflow.providers.amazon.aws.auth_manager.aws_auth_manager import AwsAuthManager
 from airflow.providers.amazon.aws.auth_manager.user import AwsAuthManagerUser
 from airflow.security.permissions import (
     RESOURCE_AUDIT_LOG,
@@ -54,6 +65,11 @@ from tests.test_utils.www import check_content_in_response
 
 if TYPE_CHECKING:
     from airflow.auth.managers.base_auth_manager import ResourceMethod
+
+pytestmark = [
+    pytest.mark.skipif(not AIRFLOW_V_2_9_PLUS, reason="Test requires Airflow 2.9+"),
+    pytest.mark.skip_if_database_isolation_mode,
+]
 
 mock = Mock()
 
@@ -83,7 +99,6 @@ def auth_manager():
                 "core",
                 "auth_manager",
             ): "airflow.providers.amazon.aws.auth_manager.aws_auth_manager.AwsAuthManager",
-            ("aws_auth_manager", "enable"): "True",
         }
     ):
         with patch.object(AwsAuthManager, "_check_avp_schema_version"):
@@ -100,7 +115,6 @@ def auth_manager_with_appbuilder():
                 "core",
                 "auth_manager",
             ): "airflow.providers.amazon.aws.auth_manager.aws_auth_manager.AwsAuthManager",
-            ("aws_auth_manager", "enable"): "True",
         }
     ):
         with patch.object(AwsAuthManager, "_check_avp_schema_version"):
@@ -120,7 +134,6 @@ def client_admin():
                 "core",
                 "auth_manager",
             ): "airflow.providers.amazon.aws.auth_manager.aws_auth_manager.AwsAuthManager",
-            ("aws_auth_manager", "enable"): "True",
             ("aws_auth_manager", "region_name"): "us-east-1",
             ("aws_auth_manager", "saml_metadata_url"): "/saml/metadata",
             ("aws_auth_manager", "avp_policy_store_id"): "avp_policy_store_id",
@@ -771,6 +784,22 @@ class TestAwsAuthManager:
 
     def test_get_cli_commands_return_cli_commands(self, auth_manager):
         assert len(auth_manager.get_cli_commands()) > 0
+
+    @pytest.mark.db_test
+    @patch(
+        "airflow.providers.amazon.aws.auth_manager.views.auth.conf.get_mandatory_value", return_value="test"
+    )
+    def test_register_views(self, mock_get_mandatory_value, auth_manager_with_appbuilder):
+        from airflow.providers.amazon.aws.auth_manager.views.auth import AwsAuthManagerAuthenticationViews
+
+        with patch.object(AwsAuthManagerAuthenticationViews, "idp_data"):
+            auth_manager_with_appbuilder.appbuilder.add_view_no_menu = Mock()
+            auth_manager_with_appbuilder.register_views()
+            auth_manager_with_appbuilder.appbuilder.add_view_no_menu.assert_called_once()
+            assert isinstance(
+                auth_manager_with_appbuilder.appbuilder.add_view_no_menu.call_args.args[0],
+                AwsAuthManagerAuthenticationViews,
+            )
 
     @pytest.mark.db_test
     @patch.object(AwsAuthManagerAmazonVerifiedPermissionsFacade, "get_batch_is_authorized_single_result")

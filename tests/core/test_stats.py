@@ -20,6 +20,7 @@ from __future__ import annotations
 import importlib
 import logging
 import re
+import time
 from unittest import mock
 from unittest.mock import Mock
 
@@ -27,7 +28,8 @@ import pytest
 import statsd
 
 import airflow
-from airflow.exceptions import AirflowConfigException, InvalidStatsNameException
+from airflow.exceptions import AirflowConfigException, InvalidStatsNameException, RemovedInAirflow3Warning
+from airflow.metrics import datadog_logger, protocols
 from airflow.metrics.datadog_logger import SafeDogStatsdLogger
 from airflow.metrics.statsd_logger import SafeStatsdLogger
 from airflow.metrics.validators import (
@@ -99,7 +101,7 @@ class TestStats:
 
     def test_enabled_by_config(self):
         """Test that enabling this sets the right instance properties"""
-        with conf_vars({("metrics", "statsd_on"): "True"}):
+        with conf_vars({("metrics", "statsd_on"): "True", ("metrics", "metrics_use_pattern_match"): "True"}):
             importlib.reload(airflow.stats)
             assert isinstance(airflow.stats.Stats.statsd, statsd.StatsClient)
             assert not hasattr(airflow.stats.Stats, "dogstatsd")
@@ -111,6 +113,7 @@ class TestStats:
             {
                 ("metrics", "statsd_on"): "True",
                 ("metrics", "statsd_custom_client_path"): f"{__name__}.CustomStatsd",
+                ("metrics", "metrics_use_pattern_match"): "True",
             }
         ):
             importlib.reload(airflow.stats)
@@ -139,6 +142,7 @@ class TestStats:
             {
                 ("metrics", "statsd_on"): "True",
                 ("metrics", "metrics_allow_list"): "name1,name2",
+                ("metrics", "metrics_use_pattern_match"): "True",
             }
         ):
             importlib.reload(airflow.stats)
@@ -152,6 +156,7 @@ class TestStats:
             {
                 ("metrics", "statsd_on"): "True",
                 ("metrics", "metrics_block_list"): "name1,name2",
+                ("metrics", "metrics_use_pattern_match"): "True",
             }
         ):
             importlib.reload(airflow.stats)
@@ -166,6 +171,7 @@ class TestStats:
                 ("metrics", "statsd_on"): "True",
                 ("metrics", "metrics_allow_list"): "name1,name2",
                 ("metrics", "metrics_block_list"): "name1,name2",
+                ("metrics", "metrics_use_pattern_match"): "True",
             }
         ):
             importlib.reload(airflow.stats)
@@ -220,24 +226,44 @@ class TestDogStats:
             metric="empty_key", sample_rate=1, tags=[], value=1
         )
 
-    def test_timer(self):
-        with self.dogstatsd.timer("empty_timer"):
+    @pytest.mark.parametrize(
+        "metrics_consistency_on",
+        [True, False],
+    )
+    @mock.patch.object(time, "perf_counter", side_effect=[0.0, 100.0])
+    def test_timer(self, time_mock, metrics_consistency_on):
+        protocols.metrics_consistency_on = metrics_consistency_on
+
+        with self.dogstatsd.timer("empty_timer") as timer:
             pass
         self.dogstatsd_client.timed.assert_called_once_with("empty_timer", tags=[])
+        expected_duration = 100.0
+        if metrics_consistency_on:
+            expected_duration = 1000.0 * 100.0
+        assert expected_duration == timer.duration
+        assert time_mock.call_count == 2
 
     def test_empty_timer(self):
         with self.dogstatsd.timer():
             pass
         self.dogstatsd_client.timed.assert_not_called()
 
-    def test_timing(self):
+    @pytest.mark.parametrize(
+        "metrics_consistency_on",
+        [True, False],
+    )
+    def test_timing(self, metrics_consistency_on):
         import datetime
+
+        datadog_logger.metrics_consistency_on = metrics_consistency_on
 
         self.dogstatsd.timing("empty_timer", 123)
         self.dogstatsd_client.timing.assert_called_once_with(metric="empty_timer", value=123, tags=[])
 
         self.dogstatsd.timing("empty_timer", datetime.timedelta(seconds=123))
-        self.dogstatsd_client.timing.assert_called_with(metric="empty_timer", value=123.0, tags=[])
+        self.dogstatsd_client.timing.assert_called_with(
+            metric="empty_timer", value=123000.0 if metrics_consistency_on else 123.0, tags=[]
+        )
 
     def test_gauge(self):
         self.dogstatsd.gauge("empty", 123)
@@ -253,7 +279,9 @@ class TestDogStats:
         """Test that enabling this sets the right instance properties"""
         from datadog import DogStatsd
 
-        with conf_vars({("metrics", "statsd_datadog_enabled"): "True"}):
+        with conf_vars(
+            {("metrics", "statsd_datadog_enabled"): "True", ("metrics", "metrics_use_pattern_match"): "True"}
+        ):
             importlib.reload(airflow.stats)
             assert isinstance(airflow.stats.Stats.dogstatsd, DogStatsd)
             assert not hasattr(airflow.stats.Stats, "statsd")
@@ -263,7 +291,13 @@ class TestDogStats:
     def test_does_not_send_stats_using_statsd_when_statsd_and_dogstatsd_both_on(self):
         from datadog import DogStatsd
 
-        with conf_vars({("metrics", "statsd_on"): "True", ("metrics", "statsd_datadog_enabled"): "True"}):
+        with conf_vars(
+            {
+                ("metrics", "statsd_on"): "True",
+                ("metrics", "statsd_datadog_enabled"): "True",
+                ("metrics", "metrics_use_pattern_match"): "True",
+            }
+        ):
             importlib.reload(airflow.stats)
             assert isinstance(airflow.stats.Stats.dogstatsd, DogStatsd)
             assert not hasattr(airflow.stats.Stats, "statsd")
@@ -383,15 +417,26 @@ class TestPatternOrBasicValidatorConfigOption:
         with conf_vars(config):
             importlib.reload(airflow.stats)
 
-            assert isinstance(airflow.stats.Stats.statsd, statsd.StatsClient)
-            assert type(airflow.stats.Stats.instance.metrics_validator) == expected
+            if eval(config.get(("metrics", "metrics_use_pattern_match"), "False")):
+                assert isinstance(airflow.stats.Stats.statsd, statsd.StatsClient)
+            else:
+                with pytest.warns(
+                    RemovedInAirflow3Warning,
+                    match="The basic metric validator will be deprecated in the future in favor of pattern-matching.  You can try this now by setting config option metrics_use_pattern_match to True.",
+                ):
+                    assert isinstance(airflow.stats.Stats.statsd, statsd.StatsClient)
+            assert isinstance(airflow.stats.Stats.instance.metrics_validator, expected)
 
     @conf_vars({**stats_on, **block_list, ("metrics", "metrics_allow_list"): "bax,qux"})
     def test_setting_allow_and_block_logs_warning(self, caplog):
         importlib.reload(airflow.stats)
 
-        assert isinstance(airflow.stats.Stats.statsd, statsd.StatsClient)
-        assert type(airflow.stats.Stats.instance.metrics_validator) == AllowListValidator
+        with pytest.warns(
+            RemovedInAirflow3Warning,
+            match="The basic metric validator will be deprecated in the future in favor of pattern-matching.  You can try this now by setting config option metrics_use_pattern_match to True.",
+        ):
+            assert isinstance(airflow.stats.Stats.statsd, statsd.StatsClient)
+        assert isinstance(airflow.stats.Stats.instance.metrics_validator, AllowListValidator)
         with caplog.at_level(logging.WARNING):
             assert "Ignoring metrics_block_list" in caplog.text
 
@@ -479,9 +524,9 @@ class TestStatsWithInfluxDBEnabled:
     def test_increment_counter_with_tags(self):
         self.stats.incr(
             "test_stats_run.delay",
-            tags={"key0": "val0", "key1": "val1", "key2": "val2"},
+            tags={"key0": 0, "key1": "val1", "key2": "val2"},
         )
-        self.statsd_client.incr.assert_called_once_with("test_stats_run.delay,key0=val0,key1=val1", 1, 1)
+        self.statsd_client.incr.assert_called_once_with("test_stats_run.delay,key0=0,key1=val1", 1, 1)
 
     def test_does_not_increment_counter_drops_invalid_tags(self):
         self.stats.incr(
@@ -503,6 +548,7 @@ class TestCustomStatsName:
     @conf_vars(
         {
             ("metrics", "statsd_on"): "True",
+            ("metrics", "metrics_use_pattern_match"): "True",
             ("metrics", "stat_name_handler"): "tests.core.test_stats.always_invalid",
         }
     )
@@ -515,6 +561,7 @@ class TestCustomStatsName:
     @conf_vars(
         {
             ("metrics", "statsd_datadog_enabled"): "True",
+            ("metrics", "metrics_use_pattern_match"): "True",
             ("metrics", "stat_name_handler"): "tests.core.test_stats.always_invalid",
         }
     )
@@ -528,6 +575,7 @@ class TestCustomStatsName:
         {
             ("metrics", "statsd_on"): "True",
             ("metrics", "stat_name_handler"): "tests.core.test_stats.always_valid",
+            ("metrics", "metrics_use_pattern_match"): "True",
         }
     )
     @mock.patch("statsd.StatsClient")
@@ -539,6 +587,7 @@ class TestCustomStatsName:
     @conf_vars(
         {
             ("metrics", "statsd_datadog_enabled"): "True",
+            ("metrics", "metrics_use_pattern_match"): "True",
             ("metrics", "stat_name_handler"): "tests.core.test_stats.always_valid",
         }
     )

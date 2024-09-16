@@ -27,8 +27,6 @@ from tests.system.providers.amazon.aws.utils import set_env_id
 from tests.test_utils.config import conf_vars
 from tests.test_utils.www import check_content_in_response
 
-pytest.importorskip("onelogin")
-
 SAML_METADATA_URL = "/saml/metadata"
 SAML_METADATA_PARSED = {
     "idp": {
@@ -121,7 +119,6 @@ def base_app(region_name, avp_policy_store_id):
                 "core",
                 "auth_manager",
             ): "airflow.providers.amazon.aws.auth_manager.aws_auth_manager.AwsAuthManager",
-            ("aws_auth_manager", "enable"): "True",
             ("aws_auth_manager", "region_name"): region_name,
             ("aws_auth_manager", "saml_metadata_url"): SAML_METADATA_URL,
             ("aws_auth_manager", "avp_policy_store_id"): avp_policy_store_id,

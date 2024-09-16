@@ -26,7 +26,7 @@ for the first time. See the table below to identify which pre-commit checks requ
 
 You can also run the checks via `Breeze <../dev/breeze/doc/README.rst>`_ environment.
 
-.. contents:: :local:
+**The outline for this document in GitHub is available at top-right corner button (with 3-dots and 3 lines).**
 
 Pre-commit hooks
 ----------------
@@ -142,9 +142,15 @@ require Breeze Docker image to be built locally.
 +-----------------------------------------------------------+--------------------------------------------------------------+---------+
 | check-builtin-literals                                    | Require literal syntax when initializing builtin types       |         |
 +-----------------------------------------------------------+--------------------------------------------------------------+---------+
+| check-changelog-format                                    | Check changelog format                                       |         |
++-----------------------------------------------------------+--------------------------------------------------------------+---------+
 | check-changelog-has-no-duplicates                         | Check changelogs for duplicate entries                       |         |
 +-----------------------------------------------------------+--------------------------------------------------------------+---------+
 | check-cncf-k8s-only-for-executors                         | Check cncf.kubernetes imports used for executors only        |         |
++-----------------------------------------------------------+--------------------------------------------------------------+---------+
+| check-code-deprecations                                   | Check deprecations categories in decorators                  |         |
++-----------------------------------------------------------+--------------------------------------------------------------+---------+
+| check-common-compat-used-for-openlineage                  | Check common.compat is used for OL deprecated classes        |         |
 +-----------------------------------------------------------+--------------------------------------------------------------+---------+
 | check-compat-cache-on-methods                             | Check that compat cache do not use on class methods          |         |
 +-----------------------------------------------------------+--------------------------------------------------------------+---------+
@@ -154,7 +160,7 @@ require Breeze Docker image to be built locally.
 +-----------------------------------------------------------+--------------------------------------------------------------+---------+
 | check-decorated-operator-implements-custom-name           | Check @task decorator implements custom_operator_name        |         |
 +-----------------------------------------------------------+--------------------------------------------------------------+---------+
-| check-deferrable-default-value                            | Check default value of deferrable attribute                  |         |
+| check-deferrable-default                                  | Check and fix default value of default_deferrable            |         |
 +-----------------------------------------------------------+--------------------------------------------------------------+---------+
 | check-docstring-param-types                               | Check that docstrings do not specify param types             |         |
 +-----------------------------------------------------------+--------------------------------------------------------------+---------+
@@ -169,6 +175,8 @@ require Breeze Docker image to be built locally.
 | check-fab-migrations                                      | Check no migration is done on FAB related table              |         |
 +-----------------------------------------------------------+--------------------------------------------------------------+---------+
 | check-for-inclusive-language                              | Check for language that we do not accept as community        |         |
++-----------------------------------------------------------+--------------------------------------------------------------+---------+
+| check-get-lineage-collector-providers                     | Check providers import hook lineage code from compat         |         |
 +-----------------------------------------------------------+--------------------------------------------------------------+---------+
 | check-google-re2-as-dependency                            | Check google-re2 is declared as dependency when needed       |         |
 +-----------------------------------------------------------+--------------------------------------------------------------+---------+
@@ -224,6 +232,8 @@ require Breeze Docker image to be built locally.
 +-----------------------------------------------------------+--------------------------------------------------------------+---------+
 | check-system-tests-tocs                                   | Check that system tests is properly added                    |         |
 +-----------------------------------------------------------+--------------------------------------------------------------+---------+
+| check-taskinstance-tis-attrs                              | Check that TI and TIS have the same attributes               |         |
++-----------------------------------------------------------+--------------------------------------------------------------+---------+
 | check-template-context-variable-in-sync                   | Check all template context variable references are in sync   |         |
 +-----------------------------------------------------------+--------------------------------------------------------------+---------+
 | check-tests-in-the-right-folders                          | Check if tests are in the right folders                      |         |
@@ -237,6 +247,10 @@ require Breeze Docker image to be built locally.
 | check-xml                                                 | Check XML files with xmllint                                 |         |
 +-----------------------------------------------------------+--------------------------------------------------------------+---------+
 | codespell                                                 | Run codespell to check for common misspellings in files      |         |
++-----------------------------------------------------------+--------------------------------------------------------------+---------+
+| compile-ui-assets                                         | Compile ui assets (manual)                                   |         |
++-----------------------------------------------------------+--------------------------------------------------------------+---------+
+| compile-ui-assets-dev                                     | Compile ui assets in dev mode (manual)                       |         |
 +-----------------------------------------------------------+--------------------------------------------------------------+---------+
 | compile-www-assets                                        | Compile www assets (manual)                                  |         |
 +-----------------------------------------------------------+--------------------------------------------------------------+---------+
@@ -257,6 +271,8 @@ require Breeze Docker image to be built locally.
 | flynt                                                     | Run flynt string format converter for Python                 |         |
 +-----------------------------------------------------------+--------------------------------------------------------------+---------+
 | generate-airflow-diagrams                                 | Generate airflow diagrams                                    |         |
++-----------------------------------------------------------+--------------------------------------------------------------+---------+
+| generate-openapi-spec                                     | Generate the FastAPI API spec                                | *       |
 +-----------------------------------------------------------+--------------------------------------------------------------+---------+
 | generate-pypi-readme                                      | Generate PyPI README                                         |         |
 +-----------------------------------------------------------+--------------------------------------------------------------+---------+
@@ -328,6 +344,8 @@ require Breeze Docker image to be built locally.
 | shellcheck                                                | Check Shell scripts syntax correctness                       |         |
 +-----------------------------------------------------------+--------------------------------------------------------------+---------+
 | trailing-whitespace                                       | Remove trailing whitespace at end of line                    |         |
++-----------------------------------------------------------+--------------------------------------------------------------+---------+
+| ts-compile-format-lint-ui                                 | TS types generation / ESLint / Prettier new UI files         |         |
 +-----------------------------------------------------------+--------------------------------------------------------------+---------+
 | ts-compile-format-lint-www                                | TS types generation / ESLint / Prettier against UI files     |         |
 +-----------------------------------------------------------+--------------------------------------------------------------+---------+

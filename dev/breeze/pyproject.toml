@@ -49,6 +49,9 @@ dependencies = [
     "click>=8.1.7",
     "filelock>=3.13.0",
     "flit>=3.5.0",
+    "google-api-python-client>=2.142.0",
+    "google-auth-httplib2>=0.2.0",
+    "google-auth-oauthlib>=1.2.0",
     "gitpython>=3.1.40",
     "hatch==1.9.4",
     # Importib_resources 6.2.0-6.3.1 break pytest_rewrite
@@ -63,9 +66,7 @@ dependencies = [
     "psutil>=5.9.6",
     "pygithub>=2.1.1",
     "pytest-xdist>=3.3.1",
-    # Temporary upper limmit to <8, not all dependencies at that moment ready to use 8.0
-    # Internal meta-task for track https://github.com/apache/airflow/issues/37156
-    "pytest>=7.4.4,<8.0",
+    "pytest>=8.2,<9",
     "pyyaml>=6.0.1",
     "requests>=2.31.0",
     "rich-click>=1.7.1",

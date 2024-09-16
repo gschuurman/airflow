@@ -28,7 +28,7 @@ from airflow.ti_deps.deps.base_ti_dep import TIDepStatus
 from airflow.ti_deps.deps.mapped_task_upstream_dep import MappedTaskUpstreamDep
 from airflow.utils.state import TaskInstanceState
 
-pytestmark = pytest.mark.db_test
+pytestmark = [pytest.mark.db_test, pytest.mark.skip_if_database_isolation_mode]
 
 if TYPE_CHECKING:
     from sqlalchemy.orm.session import Session
@@ -153,6 +153,7 @@ def test_mapped_task_upstream_dep(
     assert ti.state == expected_state
 
 
+@pytest.mark.quarantined  # FIXME: https://github.com/apache/airflow/issues/38955
 @pytest.mark.parametrize("failure_mode", [None, FAILED, UPSTREAM_FAILED])
 @pytest.mark.parametrize("skip_upstream", [True, False])
 @pytest.mark.parametrize("testcase", ["task", "group"])

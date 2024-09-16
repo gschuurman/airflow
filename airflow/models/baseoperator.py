@@ -41,6 +41,7 @@ from typing import (
     Callable,
     Collection,
     Iterable,
+    NoReturn,
     Sequence,
     TypeVar,
     Union,
@@ -49,7 +50,6 @@ from typing import (
 
 import attr
 import pendulum
-from dateutil.relativedelta import relativedelta
 from sqlalchemy import select
 from sqlalchemy.orm.exc import NoResultFound
 
@@ -57,7 +57,6 @@ from airflow.configuration import conf
 from airflow.exceptions import (
     AirflowException,
     FailStopDagInvalidTriggerRule,
-    RemovedInAirflow3Warning,
     TaskDeferralError,
     TaskDeferred,
 )
@@ -91,16 +90,16 @@ from airflow.ti_deps.deps.not_previously_skipped_dep import NotPreviouslySkipped
 from airflow.ti_deps.deps.prev_dagrun_dep import PrevDagrunDep
 from airflow.ti_deps.deps.trigger_rule_dep import TriggerRuleDep
 from airflow.utils import timezone
-from airflow.utils.context import Context, context_get_dataset_events
+from airflow.utils.context import Context, context_get_outlet_events
 from airflow.utils.decorators import fixup_decorator_warning_stack
 from airflow.utils.edgemodifier import EdgeModifier
-from airflow.utils.helpers import validate_key
+from airflow.utils.helpers import validate_instance_args, validate_key
 from airflow.utils.operator_helpers import ExecutionCallableRunner
 from airflow.utils.operator_resources import Resources
 from airflow.utils.session import NEW_SESSION, provide_session
 from airflow.utils.setup_teardown import SetupTeardownContext
 from airflow.utils.trigger_rule import TriggerRule
-from airflow.utils.types import NOTSET
+from airflow.utils.types import NOTSET, AttributeRemoved, DagRunTriggeredByType
 from airflow.utils.xcom import XCOM_RETURN_KEY
 
 if TYPE_CHECKING:
@@ -115,11 +114,9 @@ if TYPE_CHECKING:
     from airflow.models.operator import Operator
     from airflow.models.xcom_arg import XComArg
     from airflow.ti_deps.deps.base_ti_dep import BaseTIDep
-    from airflow.triggers.base import BaseTrigger
+    from airflow.triggers.base import BaseTrigger, StartTriggerArgs
     from airflow.utils.task_group import TaskGroup
     from airflow.utils.types import ArgNotSet
-
-ScheduleInterval = Union[str, timedelta, relativedelta]
 
 TaskPreExecuteHook = Callable[[Context], None]
 TaskPostExecuteHook = Callable[[Context, Any], None]
@@ -516,8 +513,53 @@ class BaseOperatorMeta(abc.ABCMeta):
             partial_desc = vars(new_cls)["partial"]
             if isinstance(partial_desc, _PartialDescriptor):
                 partial_desc.class_method = classmethod(partial)
-        new_cls.__init__ = cls._apply_defaults(new_cls.__init__)
+
+        # We patch `__init__` only if the class defines it.
+        if inspect.getmro(new_cls)[1].__init__ is not new_cls.__init__:
+            new_cls.__init__ = cls._apply_defaults(new_cls.__init__)
+
         return new_cls
+
+
+# TODO: The following mapping is used to validate that the arguments passed to the BaseOperator are of the
+#  correct type. This is a temporary solution until we find a more sophisticated method for argument
+#  validation. One potential method is to use `get_type_hints` from the typing module. However, this is not
+#  fully compatible with future annotations for Python versions below 3.10. Once we require a minimum Python
+#  version that supports `get_type_hints` effectively or find a better approach, we can replace this
+#  manual type-checking method.
+BASEOPERATOR_ARGS_EXPECTED_TYPES = {
+    "task_id": str,
+    "email": (str, Iterable),
+    "email_on_retry": bool,
+    "email_on_failure": bool,
+    "retries": int,
+    "retry_exponential_backoff": bool,
+    "depends_on_past": bool,
+    "ignore_first_depends_on_past": bool,
+    "wait_for_past_depends_before_skipping": bool,
+    "wait_for_downstream": bool,
+    "priority_weight": int,
+    "queue": str,
+    "pool": str,
+    "pool_slots": int,
+    "trigger_rule": str,
+    "run_as_user": str,
+    "task_concurrency": int,
+    "map_index_template": str,
+    "max_active_tis_per_dag": int,
+    "max_active_tis_per_dagrun": int,
+    "executor": str,
+    "do_xcom_push": bool,
+    "multiple_outputs": bool,
+    "doc": str,
+    "doc_md": str,
+    "doc_json": str,
+    "doc_yaml": str,
+    "doc_rst": str,
+    "task_display_name": str,
+    "logger_name": str,
+    "allow_nested_operators": bool,
+}
 
 
 @total_ordering
@@ -566,10 +608,10 @@ class BaseOperator(AbstractOperator, metaclass=BaseOperatorMeta):
     :param start_date: The ``start_date`` for the task, determines
         the ``execution_date`` for the first task instance. The best practice
         is to have the start_date rounded
-        to your DAG's ``schedule_interval``. Daily jobs have their start_date
+        to your DAG's schedule. Daily jobs have their start_date
         some day at 00:00:00, hourly jobs have their start_date at 00:00
         of a specific hour. Note that Airflow simply looks at the latest
-        ``execution_date`` and adds the ``schedule_interval`` to determine
+        ``execution_date`` and adds the schedule to determine
         the next ``execution_date``. It is also very important
         to note that different tasks' dependencies
         need to line up in time. If task A depends on task B and their
@@ -808,15 +850,14 @@ class BaseOperator(AbstractOperator, metaclass=BaseOperatorMeta):
     _dag: DAG | None = None
     task_group: TaskGroup | None = None
 
-    # subdag parameter is only set for SubDagOperator.
-    # Setting it to None by default as other Operators do not have that field
-    subdag: DAG | None = None
-
     start_date: pendulum.DateTime | None = None
     end_date: pendulum.DateTime | None = None
 
     # Set to True for an operator instantiated by a mapped operator.
     __from_mapped = False
+
+    start_trigger_args: StartTriggerArgs | None = None
+    start_from_trigger: bool = False
 
     def __init__(
         self,
@@ -855,7 +896,6 @@ class BaseOperator(AbstractOperator, metaclass=BaseOperatorMeta):
         trigger_rule: str = DEFAULT_TRIGGER_RULE,
         resources: dict[str, Any] | None = None,
         run_as_user: str | None = None,
-        task_concurrency: int | None = None,
         map_index_template: str | None = None,
         max_active_tis_per_dag: int | None = None,
         max_active_tis_per_dagrun: int | None = None,
@@ -885,17 +925,9 @@ class BaseOperator(AbstractOperator, metaclass=BaseOperatorMeta):
 
         kwargs.pop("_airflow_mapped_validation_only", None)
         if kwargs:
-            if not conf.getboolean("operators", "ALLOW_ILLEGAL_ARGUMENTS"):
-                raise AirflowException(
-                    f"Invalid arguments were passed to {self.__class__.__name__} (task_id: {task_id}). "
-                    f"Invalid arguments were:\n**kwargs: {kwargs}",
-                )
-            warnings.warn(
+            raise AirflowException(
                 f"Invalid arguments were passed to {self.__class__.__name__} (task_id: {task_id}). "
-                "Support for passing such arguments will be dropped in future. "
                 f"Invalid arguments were:\n**kwargs: {kwargs}",
-                category=RemovedInAirflow3Warning,
-                stacklevel=3,
             )
         validate_key(task_id)
 
@@ -933,11 +965,6 @@ class BaseOperator(AbstractOperator, metaclass=BaseOperatorMeta):
         if end_date:
             self.end_date = timezone.convert_to_utc(end_date)
 
-        if executor:
-            warnings.warn(
-                "Specifying executors for operators is not yet"
-                f"supported, the value {executor!r} will have no effect"
-            )
         self.executor = executor
         self.executor_config = executor_config or {}
         self.run_as_user = run_as_user
@@ -949,23 +976,6 @@ class BaseOperator(AbstractOperator, metaclass=BaseOperatorMeta):
             dag_str = f" in dag {dag.dag_id}" if dag else ""
             raise ValueError(f"pool slots for {self.task_id}{dag_str} cannot be less than 1")
         self.sla = sla
-
-        if trigger_rule == "dummy":
-            warnings.warn(
-                "dummy Trigger Rule is deprecated. Please use `TriggerRule.ALWAYS`.",
-                RemovedInAirflow3Warning,
-                stacklevel=2,
-            )
-            trigger_rule = TriggerRule.ALWAYS
-
-        if trigger_rule == "none_failed_or_skipped":
-            warnings.warn(
-                "none_failed_or_skipped Trigger Rule is deprecated. "
-                "Please use `none_failed_min_one_success`.",
-                RemovedInAirflow3Warning,
-                stacklevel=2,
-            )
-            trigger_rule = TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS
 
         if not TriggerRule.is_valid(trigger_rule):
             raise AirflowException(
@@ -1001,14 +1011,6 @@ class BaseOperator(AbstractOperator, metaclass=BaseOperatorMeta):
         self.priority_weight = priority_weight
         self.weight_rule = validate_and_load_priority_weight_strategy(weight_rule)
         self.resources = coerce_resources(resources)
-        if task_concurrency and not max_active_tis_per_dag:
-            # TODO: Remove in Airflow 3.0
-            warnings.warn(
-                "The 'task_concurrency' parameter is deprecated. Please use 'max_active_tis_per_dag'.",
-                RemovedInAirflow3Warning,
-                stacklevel=2,
-            )
-            max_active_tis_per_dag = task_concurrency
         self.max_active_tis_per_dag: int | None = max_active_tis_per_dag
         self.max_active_tis_per_dagrun: int | None = max_active_tis_per_dagrun
         self.do_xcom_push: bool = do_xcom_push
@@ -1071,6 +1073,8 @@ class BaseOperator(AbstractOperator, metaclass=BaseOperatorMeta):
         self._is_teardown = False
         if SetupTeardownContext.active:
             SetupTeardownContext.update_context_map(self)
+
+        validate_instance_args(self, BASEOPERATOR_ARGS_EXPECTED_TYPES)
 
     def __eq__(self, other):
         if type(self) is type(other):
@@ -1167,14 +1171,16 @@ class BaseOperator(AbstractOperator, metaclass=BaseOperatorMeta):
         self.outlets.extend(outlets)
 
     def get_inlet_defs(self):
-        """Get inlet definitions on this task.
+        """
+        Get inlet definitions on this task.
 
         :meta private:
         """
         return self.inlets
 
     def get_outlet_defs(self):
-        """Get outlet definitions on this task.
+        """
+        Get outlet definitions on this task.
 
         :meta private:
         """
@@ -1194,11 +1200,21 @@ class BaseOperator(AbstractOperator, metaclass=BaseOperatorMeta):
     @dag.setter
     def dag(self, dag: DAG | None):
         """Operators can be assigned to one DAG, one time. Repeat assignments to that same DAG are ok."""
-        from airflow.models.dag import DAG
-
         if dag is None:
             self._dag = None
             return
+
+        # if set to removed, then just set and exit
+        if self._dag.__class__ is AttributeRemoved:
+            self._dag = dag
+            return
+        # if setting to removed, then just set and exit
+        if dag.__class__ is AttributeRemoved:
+            self._dag = AttributeRemoved("_dag")  # type: ignore[assignment]
+            return
+
+        from airflow.models.dag import DAG
+
         if not isinstance(dag, DAG):
             raise TypeError(f"Expected DAG; received {dag.__class__.__name__}")
         elif self.has_dag() and self.dag is not dag:
@@ -1274,7 +1290,7 @@ class BaseOperator(AbstractOperator, metaclass=BaseOperatorMeta):
             return
         ExecutionCallableRunner(
             self._pre_execute_hook,
-            context_get_dataset_events(context),
+            context_get_outlet_events(context),
             logger=self.log,
         ).run(context)
 
@@ -1299,7 +1315,7 @@ class BaseOperator(AbstractOperator, metaclass=BaseOperatorMeta):
             return
         ExecutionCallableRunner(
             self._post_execute_hook,
-            context_get_dataset_events(context),
+            context_get_outlet_events(context),
             logger=self.log,
         ).run(context, result)
 
@@ -1348,7 +1364,8 @@ class BaseOperator(AbstractOperator, metaclass=BaseOperatorMeta):
         context: Context,
         jinja_env: jinja2.Environment | None = None,
     ) -> None:
-        """Template all attributes listed in *self.template_fields*.
+        """
+        Template all attributes listed in *self.template_fields*.
 
         This mutates the attributes in-place and is irreversible.
 
@@ -1455,6 +1472,7 @@ class BaseOperator(AbstractOperator, metaclass=BaseOperatorMeta):
                     run_type=DagRunType.MANUAL,
                     execution_date=info.logical_date,
                     data_interval=info.data_interval,
+                    triggered_by=DagRunTriggeredByType.TEST,
                 )
                 ti = TaskInstance(self, run_id=dr.run_id)
                 ti.dag_run = dr
@@ -1532,7 +1550,8 @@ class BaseOperator(AbstractOperator, metaclass=BaseOperatorMeta):
 
     @property
     def is_setup(self) -> bool:
-        """Whether the operator is a setup task.
+        """
+        Whether the operator is a setup task.
 
         :meta private:
         """
@@ -1540,7 +1559,8 @@ class BaseOperator(AbstractOperator, metaclass=BaseOperatorMeta):
 
     @is_setup.setter
     def is_setup(self, value: bool) -> None:
-        """Setter for is_setup property.
+        """
+        Setter for is_setup property.
 
         :meta private:
         """
@@ -1550,7 +1570,8 @@ class BaseOperator(AbstractOperator, metaclass=BaseOperatorMeta):
 
     @property
     def is_teardown(self) -> bool:
-        """Whether the operator is a teardown task.
+        """
+        Whether the operator is a teardown task.
 
         :meta private:
         """
@@ -1572,7 +1593,6 @@ class BaseOperator(AbstractOperator, metaclass=BaseOperatorMeta):
         context: Any,
         key: str,
         value: Any,
-        execution_date: datetime | None = None,
     ) -> None:
         """
         Make an XCom available for tasks to pull.
@@ -1581,11 +1601,8 @@ class BaseOperator(AbstractOperator, metaclass=BaseOperatorMeta):
         :param key: A key for the XCom
         :param value: A value for the XCom. The value is pickled and stored
             in the database.
-        :param execution_date: if provided, the XCom will not be visible until
-            this date. This can be used, for example, to send a message to a
-            task on a future date without it being immediately visible.
         """
-        context["ti"].xcom_push(key=key, value=value, execution_date=execution_date)
+        context["ti"].xcom_push(key=key, value=value)
 
     @staticmethod
     @provide_session
@@ -1662,7 +1679,6 @@ class BaseOperator(AbstractOperator, metaclass=BaseOperatorMeta):
                     "end_date",
                     "_task_type",
                     "_operator_name",
-                    "subdag",
                     "ui_color",
                     "ui_fgcolor",
                     "template_ext",
@@ -1673,6 +1689,9 @@ class BaseOperator(AbstractOperator, metaclass=BaseOperatorMeta):
                     "is_teardown",
                     "on_failure_fail_dagrun",
                     "map_index_template",
+                    "start_trigger_args",
+                    "_needs_expansion",
+                    "start_from_trigger",
                 }
             )
             DagContext.pop_context_managed_dag()
@@ -1698,12 +1717,15 @@ class BaseOperator(AbstractOperator, metaclass=BaseOperatorMeta):
         method_name: str,
         kwargs: dict[str, Any] | None = None,
         timeout: timedelta | None = None,
-    ):
+    ) -> NoReturn:
         """
         Mark this Operator "deferred", suspending its execution until the provided trigger fires an event.
 
         This is achieved by raising a special exception (TaskDeferred)
-        which is caught in the main _execute_task wrapper.
+        which is caught in the main _execute_task wrapper. Triggers can send execution back to task or end
+        the task instance directly. If the trigger will end the task instance itself, ``method_name`` should
+        be None; otherwise, provide the name of the method that should be used when resuming execution in
+        the task.
         """
         raise TaskDeferred(trigger=trigger, method_name=method_name, kwargs=kwargs, timeout=timeout)
 
@@ -1724,7 +1746,8 @@ class BaseOperator(AbstractOperator, metaclass=BaseOperatorMeta):
         return execute_callable(context)
 
     def unmap(self, resolve: None | dict[str, Any] | tuple[Context, Session]) -> BaseOperator:
-        """Get the "normal" operator from the current operator.
+        """
+        Get the "normal" operator from the current operator.
 
         Since a BaseOperator is not mapped to begin with, this simply returns
         the original operator.
@@ -1732,6 +1755,28 @@ class BaseOperator(AbstractOperator, metaclass=BaseOperatorMeta):
         :meta private:
         """
         return self
+
+    def expand_start_from_trigger(self, *, context: Context, session: Session) -> bool:
+        """
+        Get the start_from_trigger value of the current abstract operator.
+
+        Since a BaseOperator is not mapped to begin with, this simply returns
+        the original value of start_from_trigger.
+
+        :meta private:
+        """
+        return self.start_from_trigger
+
+    def expand_start_trigger_args(self, *, context: Context, session: Session) -> StartTriggerArgs | None:
+        """
+        Get the start_trigger_args value of the current abstract operator.
+
+        Since a BaseOperator is not mapped to begin with, this simply returns
+        the original value of start_trigger_args.
+
+        :meta private:
+        """
+        return self.start_trigger_args
 
 
 # TODO: Deprecate for Airflow 3.0
@@ -1998,32 +2043,3 @@ def chain_linear(*elements: DependencyMixin | Sequence[DependencyMixin]):
         prev_elem = [curr_elem] if isinstance(curr_elem, DependencyMixin) else curr_elem
     if not deps_set:
         raise ValueError("No dependencies were set. Did you forget to expand with `*`?")
-
-
-def __getattr__(name):
-    """
-    PEP-562: Lazy loaded attributes on python modules.
-
-    :meta private:
-    """
-    path = __deprecated_imports.get(name)
-    if not path:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-    from airflow.utils.module_loading import import_string
-
-    warnings.warn(
-        f"Import `{__name__}.{name}` is deprecated. Please use `{path}.{name}`.",
-        RemovedInAirflow3Warning,
-        stacklevel=2,
-    )
-    val = import_string(f"{path}.{name}")
-
-    # Store for next time
-    globals()[name] = val
-    return val
-
-
-__deprecated_imports = {
-    "BaseOperatorLink": "airflow.models.baseoperatorlink",
-}

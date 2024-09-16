@@ -26,6 +26,7 @@ from unittest.mock import MagicMock, patch
 
 import kubernetes
 import pytest
+from kubernetes.client.rest import ApiException
 from kubernetes.config import ConfigException
 from sqlalchemy.orm import make_transient
 
@@ -40,7 +41,6 @@ from tests.test_utils.providers import get_provider_min_airflow_version
 
 pytestmark = pytest.mark.db_test
 
-
 KUBE_CONFIG_PATH = os.getenv("KUBECONFIG", "~/.kube/config")
 HOOK_MODULE = "airflow.providers.cncf.kubernetes.hooks.kubernetes"
 
@@ -49,6 +49,7 @@ ASYNC_CONFIG_PATH = "/files/path/to/config/file"
 POD_NAME = "test-pod"
 NAMESPACE = "test-namespace"
 JOB_NAME = "test-job"
+CONTAINER_NAME = "test-container"
 POLL_INTERVAL = 100
 
 
@@ -624,6 +625,44 @@ class TestKubernetesHook:
         mock_sleep.assert_has_calls([mock.call(POLL_INTERVAL)] * 4)
         assert job_actual == job_expected
 
+    @patch(f"{HOOK_MODULE}.json.dumps")
+    @patch(f"{HOOK_MODULE}.KubernetesHook.batch_v1_client")
+    def test_create_job_retries_on_500_error(self, mock_client, mock_json_dumps):
+        mock_client.create_namespaced_job.side_effect = [
+            ApiException(status=500),
+            MagicMock(),
+        ]
+
+        hook = KubernetesHook()
+        hook.create_job(job=mock.MagicMock())
+
+        assert mock_client.create_namespaced_job.call_count == 2
+
+    @patch(f"{HOOK_MODULE}.json.dumps")
+    @patch(f"{HOOK_MODULE}.KubernetesHook.batch_v1_client")
+    def test_create_job_fails_on_other_exception(self, mock_client, mock_json_dumps):
+        mock_client.create_namespaced_job.side_effect = [ApiException(status=404)]
+
+        hook = KubernetesHook()
+        with pytest.raises(ApiException):
+            hook.create_job(job=mock.MagicMock())
+
+    @patch(f"{HOOK_MODULE}.json.dumps")
+    @patch(f"{HOOK_MODULE}.KubernetesHook.batch_v1_client")
+    def test_create_job_retries_three_times(self, mock_client, mock_json_dumps):
+        mock_client.create_namespaced_job.side_effect = [
+            ApiException(status=500),
+            ApiException(status=500),
+            ApiException(status=500),
+            ApiException(status=500),
+        ]
+
+        hook = KubernetesHook()
+        with pytest.raises(ApiException):
+            hook.create_job(job=mock.MagicMock())
+
+        assert mock_client.create_namespaced_job.call_count == 3
+
 
 class TestKubernetesHookIncorrectConfiguration:
     @pytest.mark.parametrize(
@@ -646,6 +685,7 @@ class TestAsyncKubernetesHook:
     KUBE_CONFIG_MERGER = "kubernetes_asyncio.config.kube_config.KubeConfigMerger"
     INCLUSTER_CONFIG_LOADER = "kubernetes_asyncio.config.incluster_config.InClusterConfigLoader"
     KUBE_LOADER_CONFIG = "kubernetes_asyncio.config.kube_config.KubeConfigLoader"
+    KUBE_CONFIG_FROM_DICT = "kubernetes_asyncio.config.kube_config.load_kube_config_from_dict"
     KUBE_API = "kubernetes_asyncio.client.api.core_v1_api.CoreV1Api.{}"
     KUBE_BATCH_API = "kubernetes_asyncio.client.api.batch_v1_api.BatchV1Api.{}"
     KUBE_ASYNC_HOOK = HOOK_MODULE + ".AsyncKubernetesHook.{}"
@@ -695,19 +735,19 @@ class TestAsyncKubernetesHook:
     @pytest.mark.asyncio
     @mock.patch(INCLUSTER_CONFIG_LOADER)
     @mock.patch(KUBE_CONFIG_MERGER)
-    async def test_load_config_with_config_path(
+    async def test_load_config_with_config_dict(
         self, kube_config_merger, incluster_config, kube_config_loader
     ):
         hook = AsyncKubernetesHook(
             conn_id=None,
             in_cluster=False,
-            config_file=ASYNC_CONFIG_PATH,
+            config_dict={"a": "b"},
             cluster_context=None,
         )
         await hook._load_config()
         assert not incluster_config.called
+        assert hook._is_in_cluster is False
         kube_config_loader.assert_called_once()
-        kube_config_merger.assert_called_once()
 
     @pytest.mark.asyncio
     @mock.patch(INCLUSTER_CONFIG_LOADER)
@@ -882,3 +922,81 @@ class TestAsyncKubernetesHook:
         mock_is_job_complete.assert_has_calls([mock.call(job=mock_job_0), mock.call(job=mock_job_1)])
         mock_sleep.assert_awaited_once_with(10)
         assert job_actual == mock_job_1
+
+    @pytest.mark.asyncio
+    @mock.patch(HOOK_MODULE + ".asyncio.sleep")
+    @mock.patch(HOOK_MODULE + ".container_is_completed")
+    @mock.patch(KUBE_ASYNC_HOOK.format("get_pod"))
+    async def test_wait_until_container_complete(
+        self, mock_get_pod, mock_container_is_completed, mock_sleep, kube_config_loader
+    ):
+        mock_pod_0, mock_pod_1 = mock.MagicMock(), mock.MagicMock()
+        mock_get_pod.side_effect = mock.AsyncMock(side_effect=[mock_pod_0, mock_pod_1])
+        mock_container_is_completed.side_effect = [False, True]
+
+        hook = AsyncKubernetesHook(
+            conn_id=None,
+            in_cluster=False,
+            config_file=None,
+            cluster_context=None,
+        )
+
+        await hook.wait_until_container_complete(
+            name=POD_NAME,
+            namespace=NAMESPACE,
+            container_name=CONTAINER_NAME,
+            poll_interval=10,
+        )
+
+        mock_get_pod.assert_has_awaits(
+            [
+                mock.call(name=POD_NAME, namespace=NAMESPACE),
+                mock.call(name=POD_NAME, namespace=NAMESPACE),
+            ]
+        )
+        mock_container_is_completed.assert_has_calls(
+            [
+                mock.call(pod=mock_pod_0, container_name=CONTAINER_NAME),
+                mock.call(pod=mock_pod_1, container_name=CONTAINER_NAME),
+            ]
+        )
+        mock_sleep.assert_awaited_once_with(10)
+
+    @pytest.mark.asyncio
+    @mock.patch(HOOK_MODULE + ".asyncio.sleep")
+    @mock.patch(HOOK_MODULE + ".container_is_running")
+    @mock.patch(KUBE_ASYNC_HOOK.format("get_pod"))
+    async def test_wait_until_container_started(
+        self, mock_get_pod, mock_container_is_running, mock_sleep, kube_config_loader
+    ):
+        mock_pod_0, mock_pod_1 = mock.MagicMock(), mock.MagicMock()
+        mock_get_pod.side_effect = mock.AsyncMock(side_effect=[mock_pod_0, mock_pod_1])
+        mock_container_is_running.side_effect = [False, True]
+
+        hook = AsyncKubernetesHook(
+            conn_id=None,
+            in_cluster=False,
+            config_file=None,
+            cluster_context=None,
+        )
+
+        await hook.wait_until_container_started(
+            name=POD_NAME,
+            namespace=NAMESPACE,
+            container_name=CONTAINER_NAME,
+            poll_interval=10,
+        )
+
+        mock_get_pod.assert_has_awaits(
+            [
+                mock.call(name=POD_NAME, namespace=NAMESPACE),
+                mock.call(name=POD_NAME, namespace=NAMESPACE),
+            ]
+        )
+        mock_container_is_running.assert_has_calls(
+            [
+                mock.call(pod=mock_pod_0, container_name=CONTAINER_NAME),
+                mock.call(pod=mock_pod_1, container_name=CONTAINER_NAME),
+            ]
+        )
+        mock_sleep.assert_awaited_once_with(10)

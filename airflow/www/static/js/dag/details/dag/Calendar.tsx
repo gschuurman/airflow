@@ -21,7 +21,7 @@
 
 import React from "react";
 import type { EChartsOption } from "echarts";
-import { Box, Spinner, Flex } from "@chakra-ui/react";
+import { Box, Spinner, Flex, Text } from "@chakra-ui/react";
 
 import ReactECharts from "src/components/ReactECharts";
 import { useCalendarData } from "src/api";
@@ -36,6 +36,10 @@ const Calendar = () => {
   if (!calendarData) return null;
 
   const { dagStates } = calendarData;
+
+  if (dagStates.length < 1) {
+    return <Text>Calendar view requires at least one DAG Run.</Text>;
+  }
 
   const startDate = dagStates[0].date;
   const endDate = dagStates[dagStates.length - 1].date;
@@ -73,8 +77,8 @@ const Calendar = () => {
 
   // We need to split the data into multiple years of calendars
   if (startYear !== endYear) {
-    for (let y = startYear; y <= endYear; y += 1) {
-      const index = y - startYear;
+    for (let y = endYear; y >= startYear; y -= 1) {
+      const index = endYear - y;
       const yearStartDate = y === startYear ? startDate : `${y}-01-01`;
       const yearEndDate = `${y}-12-31`;
       calendarOption.push({
@@ -178,6 +182,7 @@ const Calendar = () => {
           color: "gray",
           opacity: 0.6,
         },
+        show: false,
       },
     ],
     calendar: calendarOption,
@@ -191,10 +196,10 @@ const Calendar = () => {
   };
 
   return (
-    <Box height="100%">
+    <Box height={`${calendarOption.length * 165}px`} width="900px">
       <Flex>
         <InfoTooltip
-          label="        Only showing the next year of planned DAG runs or the next 2000 runs,
+          label="Only showing the next year of planned DAG runs or the next 2000 runs,
           whichever comes first."
           size={16}
         />

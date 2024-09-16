@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import itertools
 import os
-import warnings
 from collections import defaultdict
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, NamedTuple, Sequence, TypeVar, overload
 
@@ -27,6 +26,7 @@ import re2
 from sqlalchemy import (
     Boolean,
     Column,
+    Enum,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
@@ -45,13 +45,13 @@ from sqlalchemy import (
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.associationproxy import association_proxy
 from sqlalchemy.orm import declared_attr, joinedload, relationship, synonym, validates
-from sqlalchemy.sql.expression import false, select, true
+from sqlalchemy.sql.expression import case, false, select, true
 
 from airflow import settings
 from airflow.api_internal.internal_api_call import internal_api_call
 from airflow.callbacks.callback_requests import DagCallbackRequest
 from airflow.configuration import conf as airflow_conf
-from airflow.exceptions import AirflowException, RemovedInAirflow3Warning, TaskNotFound
+from airflow.exceptions import AirflowException, TaskNotFound
 from airflow.listeners.listener import get_listener_manager
 from airflow.models import Log
 from airflow.models.abstractoperator import NotMapped
@@ -62,13 +62,15 @@ from airflow.models.tasklog import LogTemplate
 from airflow.stats import Stats
 from airflow.ti_deps.dep_context import DepContext
 from airflow.ti_deps.dependencies_states import SCHEDULEABLE_STATES
+from airflow.traces.tracer import Trace
 from airflow.utils import timezone
+from airflow.utils.dates import datetime_to_nano
 from airflow.utils.helpers import chunks, is_container, prune_dict
 from airflow.utils.log.logging_mixin import LoggingMixin
 from airflow.utils.session import NEW_SESSION, provide_session
 from airflow.utils.sqlalchemy import UtcDateTime, nulls_first, tuple_in_condition, with_row_locks
 from airflow.utils.state import DagRunState, State, TaskInstanceState
-from airflow.utils.types import NOTSET, DagRunType
+from airflow.utils.types import NOTSET, DagRunTriggeredByType, DagRunType
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -109,7 +111,8 @@ def _creator_note(val):
 
 
 class DagRun(Base, LoggingMixin):
-    """Invocation instance of a DAG.
+    """
+    Invocation instance of a DAG.
 
     A DAG run can be created by the scheduler (i.e. scheduled runs), or by an
     external trigger (i.e. manual runs).
@@ -120,7 +123,7 @@ class DagRun(Base, LoggingMixin):
     id = Column(Integer, primary_key=True)
     dag_id = Column(StringID(), nullable=False)
     queued_at = Column(UtcDateTime)
-    execution_date = Column(UtcDateTime, default=timezone.utcnow, nullable=False)
+    execution_date = Column("logical_date", UtcDateTime, default=timezone.utcnow, nullable=False)
     start_date = Column(UtcDateTime)
     end_date = Column(UtcDateTime)
     _state = Column("state", String(50), default=DagRunState.QUEUED)
@@ -128,6 +131,9 @@ class DagRun(Base, LoggingMixin):
     creating_job_id = Column(Integer)
     external_trigger = Column(Boolean, default=True)
     run_type = Column(String(50), nullable=False)
+    triggered_by = Column(
+        Enum(DagRunTriggeredByType, native_enum=False, length=50)
+    )  # Airflow component that triggered the run.
     conf = Column(PickleType)
     # These two must be either both NULL or both datetime.
     data_interval_start = Column(UtcDateTime)
@@ -147,7 +153,7 @@ class DagRun(Base, LoggingMixin):
     # Keeps track of the number of times the dagrun had been cleared.
     # This number is incremented only when the DagRun is re-Queued,
     # when the DagRun is cleared.
-    clear_number = Column(Integer, default=0, nullable=False)
+    clear_number = Column(Integer, default=0, nullable=False, server_default="0")
 
     # Remove this `if` after upgrading Sphinx-AutoAPI
     if not TYPE_CHECKING and "BUILDING_AIRFLOW_DOCS" in os.environ:
@@ -157,9 +163,7 @@ class DagRun(Base, LoggingMixin):
 
     __table_args__ = (
         Index("dag_id_state", dag_id, _state),
-        UniqueConstraint("dag_id", "execution_date", name="dag_run_dag_id_execution_date_key"),
         UniqueConstraint("dag_id", "run_id", name="dag_run_dag_id_run_id_key"),
-        Index("idx_last_scheduling_decision", last_scheduling_decision),
         Index("idx_dag_run_dag_id", dag_id),
         Index(
             "idx_dag_run_running_dags",
@@ -216,6 +220,7 @@ class DagRun(Base, LoggingMixin):
         dag_hash: str | None = None,
         creating_job_id: int | None = None,
         data_interval: tuple[datetime, datetime] | None = None,
+        triggered_by: DagRunTriggeredByType | None = None,
     ):
         if data_interval is None:
             # Legacy: Only happen for runs created prior to Airflow 2.2.
@@ -239,6 +244,7 @@ class DagRun(Base, LoggingMixin):
         self.dag_hash = dag_hash
         self.creating_job_id = creating_job_id
         self.clear_number = 0
+        self.triggered_by = triggered_by
         super().__init__()
 
     def __repr__(self):
@@ -270,7 +276,8 @@ class DagRun(Base, LoggingMixin):
         return self._state
 
     def set_state(self, state: DagRunState) -> None:
-        """Change the state of the DagRan.
+        """
+        Change the state of the DagRan.
 
         Changes to attributes are implemented in accordance with the following table
         (rows represent old states, columns represent new states):
@@ -587,7 +594,6 @@ class DagRun(Base, LoggingMixin):
             )
             filter_query = [
                 DagModel.dag_id == self.dag_id,
-                DagModel.root_dag_id == self.dag_id,  # for sub-dags
             ]
             session.execute(
                 update(DagModel)
@@ -622,7 +628,7 @@ class DagRun(Base, LoggingMixin):
         Redirect to DagRun.fetch_task_instances method.
         Keep this method because it is widely used across the code.
         """
-        task_ids = self.dag.task_ids if self.dag and self.dag.partial else None
+        task_ids = DagRun._get_partial_task_ids(self.dag)
         return DagRun.fetch_task_instances(
             dag_id=self.dag_id, run_id=self.run_id, task_ids=task_ids, state=state, session=session
         )
@@ -817,7 +823,7 @@ class DagRun(Base, LoggingMixin):
 
         # if all tasks finished and at least one failed, the run failed
         if not unfinished.tis and any(x.state in State.failed_states for x in tis_for_dagrun_state):
-            self.log.error("Marking run %s failed", self)
+            self.log.info("Marking run %s failed", self)
             self.set_state(DagRunState.FAILED)
             self.notify_dagrun_state_changed(msg="task_failure")
 
@@ -906,9 +912,11 @@ class DagRun(Base, LoggingMixin):
                 self.run_id,
                 self.start_date,
                 self.end_date,
-                (self.end_date - self.start_date).total_seconds()
-                if self.start_date and self.end_date
-                else None,
+                (
+                    (self.end_date - self.start_date).total_seconds()
+                    if self.start_date and self.end_date
+                    else None
+                ),
                 self._state,
                 self.external_trigger,
                 self.run_type,
@@ -916,6 +924,37 @@ class DagRun(Base, LoggingMixin):
                 self.data_interval_end,
                 self.dag_hash,
             )
+
+            with Trace.start_span_from_dagrun(dagrun=self) as span:
+                if self._state is DagRunState.FAILED:
+                    span.set_attribute("error", True)
+                attributes = {
+                    "category": "DAG runs",
+                    "dag_id": str(self.dag_id),
+                    "execution_date": str(self.execution_date),
+                    "run_id": str(self.run_id),
+                    "queued_at": str(self.queued_at),
+                    "run_start_date": str(self.start_date),
+                    "run_end_date": str(self.end_date),
+                    "run_duration": str(
+                        (self.end_date - self.start_date).total_seconds()
+                        if self.start_date and self.end_date
+                        else 0
+                    ),
+                    "state": str(self._state),
+                    "external_trigger": str(self.external_trigger),
+                    "run_type": str(self.run_type),
+                    "data_interval_start": str(self.data_interval_start),
+                    "data_interval_end": str(self.data_interval_end),
+                    "dag_hash": str(self.dag_hash),
+                    "conf": str(self.conf),
+                }
+                if span.is_recording():
+                    span.add_event(name="queued", timestamp=datetime_to_nano(self.queued_at))
+                    span.add_event(name="started", timestamp=datetime_to_nano(self.start_date))
+                    span.add_event(name="ended", timestamp=datetime_to_nano(self.end_date))
+                span.set_attributes(attributes)
+
             session.flush()
 
         self._emit_true_scheduling_delay_stats_for_finished_state(finished_tis)
@@ -1010,7 +1049,8 @@ class DagRun(Base, LoggingMixin):
         )
 
         def _expand_mapped_task_if_needed(ti: TI) -> Iterable[TI] | None:
-            """Try to expand the ti, if needed.
+            """
+            Try to expand the ti, if needed.
 
             If the ti needs expansion, newly created task instances are
             returned as well as the original ti.
@@ -1100,7 +1140,8 @@ class DagRun(Base, LoggingMixin):
         )
 
     def _emit_true_scheduling_delay_stats_for_finished_state(self, finished_tis: list[TI]) -> None:
-        """Emit the true scheduling delay stats.
+        """
+        Emit the true scheduling delay stats.
 
         The true scheduling delay stats is defined as the time when the first
         task in DAG starts minus the expected DAG run datetime.
@@ -1116,8 +1157,7 @@ class DagRun(Base, LoggingMixin):
         rid of the outliers on the stats side through dashboards tooling.
 
         Note that the stat will only be emitted for scheduler-triggered DAG runs
-        (i.e. when ``external_trigger`` is *False* and ``clear_number`` is
-        greater than 0).
+        (i.e. when ``external_trigger`` is *False* and ``clear_number`` is equal to 0).
         """
         if self.state == TaskInstanceState.RUNNING:
             return
@@ -1413,7 +1453,8 @@ class DagRun(Base, LoggingMixin):
             session.rollback()
 
     def _revise_map_indexes_if_mapped(self, task: Operator, *, session: Session) -> Iterator[TI]:
-        """Check if task increased or reduced in length and handle appropriately.
+        """
+        Check if task increased or reduced in length and handle appropriately.
 
         Task instances that do not already exist are created and returned if
         possible. Expansion only happens if all upstreams are ready; otherwise
@@ -1462,31 +1503,6 @@ class DagRun(Base, LoggingMixin):
             ti.refresh_from_task(task)
             session.flush()
             yield ti
-
-    @staticmethod
-    def get_run(session: Session, dag_id: str, execution_date: datetime) -> DagRun | None:
-        """
-        Get a single DAG Run.
-
-        :meta private:
-        :param session: Sqlalchemy ORM Session
-        :param dag_id: DAG ID
-        :param execution_date: execution date
-        :return: DagRun corresponding to the given dag_id and execution date
-            if one exists. None otherwise.
-        """
-        warnings.warn(
-            "This method is deprecated. Please use SQLAlchemy directly",
-            RemovedInAirflow3Warning,
-            stacklevel=2,
-        )
-        return session.scalar(
-            select(DagRun).where(
-                DagRun.dag_id == dag_id,
-                DagRun.external_trigger == False,  # noqa: E712
-                DagRun.execution_date == execution_date,
-            )
-        )
 
     @property
     def is_backfill(self) -> bool:
@@ -1539,6 +1555,21 @@ class DagRun(Base, LoggingMixin):
                 and not ti.task.outlets
             ):
                 dummy_ti_ids.append((ti.task_id, ti.map_index))
+            # check "start_trigger_args" to see whether the operator supports start execution from triggerer
+            # if so, we'll then check "start_from_trigger" to see whether this feature is turned on and defer
+            # this task.
+            # if not, we'll add this "ti" into "schedulable_ti_ids" and later execute it to run in the worker
+            elif ti.task.start_trigger_args is not None:
+                context = ti.get_template_context()
+                start_from_trigger = ti.task.expand_start_from_trigger(context=context, session=session)
+
+                if start_from_trigger:
+                    ti.start_date = timezone.utcnow()
+                    if ti.state != TaskInstanceState.UP_FOR_RESCHEDULE:
+                        ti.try_number += 1
+                    ti.defer_task(exception=None, session=session)
+                else:
+                    schedulable_ti_ids.append((ti.task_id, ti.map_index))
             else:
                 schedulable_ti_ids.append((ti.task_id, ti.map_index))
 
@@ -1556,7 +1587,16 @@ class DagRun(Base, LoggingMixin):
                         TI.run_id == self.run_id,
                         tuple_in_condition((TI.task_id, TI.map_index), schedulable_ti_ids_chunk),
                     )
-                    .values(state=TaskInstanceState.SCHEDULED)
+                    .values(
+                        state=TaskInstanceState.SCHEDULED,
+                        try_number=case(
+                            (
+                                or_(TI.state.is_(None), TI.state != TaskInstanceState.UP_FOR_RESCHEDULE),
+                                TI.try_number + 1,
+                            ),
+                            else_=TI.try_number,
+                        ),
+                    )
                     .execution_options(synchronize_session=False)
                 ).rowcount
 
@@ -1576,6 +1616,7 @@ class DagRun(Base, LoggingMixin):
                         start_date=timezone.utcnow(),
                         end_date=timezone.utcnow(),
                         duration=0,
+                        try_number=TI.try_number + 1,
                     )
                     .execution_options(
                         synchronize_session=False,
@@ -1606,14 +1647,9 @@ class DagRun(Base, LoggingMixin):
             )
         return template
 
-    @provide_session
-    def get_log_filename_template(self, *, session: Session = NEW_SESSION) -> str:
-        warnings.warn(
-            "This method is deprecated. Please use get_log_template instead.",
-            RemovedInAirflow3Warning,
-            stacklevel=2,
-        )
-        return self.get_log_template(session=session).filename
+    @staticmethod
+    def _get_partial_task_ids(dag: DAG | None) -> list[str] | None:
+        return dag.task_ids if dag and dag.partial else None
 
 
 class DagRunNote(Base):
@@ -1621,11 +1657,7 @@ class DagRunNote(Base):
 
     __tablename__ = "dag_run_note"
 
-    user_id = Column(
-        Integer,
-        ForeignKey("ab_user.id", name="dag_run_note_user_fkey"),
-        nullable=True,
-    )
+    user_id = Column(Integer, nullable=True)
     dag_run_id = Column(Integer, primary_key=True, nullable=False)
     content = Column(String(1000).with_variant(Text(1000), "mysql"))
     created_at = Column(UtcDateTime, default=timezone.utcnow, nullable=False)

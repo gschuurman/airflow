@@ -59,13 +59,14 @@ from airflow.api_connexion.schemas.task_instance_schema import (
     task_instance_reference_collection_schema,
 )
 from airflow.auth.managers.models.resource_details import DagAccessEntity
+from airflow.exceptions import ParamValidationError
 from airflow.models import DagModel, DagRun
 from airflow.timetables.base import DataInterval
 from airflow.utils.airflow_flask_app import get_airflow_app
 from airflow.utils.db import get_query_count
 from airflow.utils.session import NEW_SESSION, provide_session
 from airflow.utils.state import DagRunState
-from airflow.utils.types import DagRunType
+from airflow.utils.types import DagRunTriggeredByType, DagRunType
 from airflow.www.decorators import action_logging
 from airflow.www.extensions.init_auth_manager import get_auth_manager
 
@@ -171,7 +172,7 @@ def _fetch_dag_runs(
         query = query.where(DagRun.updated_at <= updated_at_lte)
 
     total_entries = get_query_count(query, session=session)
-    to_replace = {"dag_run_id": "run_id"}
+    to_replace = {"dag_run_id": "run_id", "execution_date": "logical_date"}
     allowed_sort_attrs = [
         "id",
         "state",
@@ -350,13 +351,14 @@ def post_dag_run(*, dag_id: str, session: Session = NEW_SESSION) -> APIResponse:
                 external_trigger=True,
                 dag_hash=get_airflow_app().dag_bag.dags_hash.get(dag_id),
                 session=session,
+                triggered_by=DagRunTriggeredByType.REST_API,
             )
             dag_run_note = post_body.get("note")
             if dag_run_note:
                 current_user_id = get_auth_manager().get_user_id()
                 dag_run.note = (dag_run_note, current_user_id)
             return dagrun_schema.dump(dag_run)
-        except ValueError as ve:
+        except (ValueError, ParamValidationError) as ve:
             raise BadRequest(detail=str(ve))
 
     if dagrun_instance.execution_date == logical_date:
@@ -424,8 +426,6 @@ def clear_dag_run(*, dag_id: str, dag_run_id: str, session: Session = NEW_SESSIO
             start_date=start_date,
             end_date=end_date,
             task_ids=None,
-            include_subdags=True,
-            include_parentdag=True,
             only_failed=False,
             dry_run=True,
         )
@@ -437,8 +437,6 @@ def clear_dag_run(*, dag_id: str, dag_run_id: str, session: Session = NEW_SESSIO
             start_date=start_date,
             end_date=end_date,
             task_ids=None,
-            include_subdags=True,
-            include_parentdag=True,
             only_failed=False,
         )
         dag_run = session.execute(select(DagRun).where(DagRun.id == dag_run.id)).scalar_one()

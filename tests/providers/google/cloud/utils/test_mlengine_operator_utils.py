@@ -24,7 +24,7 @@ from unittest import mock
 import dill
 import pytest
 
-from airflow.exceptions import AirflowException
+from airflow.exceptions import AirflowException, AirflowProviderDeprecationWarning
 from airflow.models import DAG
 from airflow.operators.python import PythonOperator
 from airflow.providers.apache.beam.operators.beam import BeamRunPythonPipelineOperator
@@ -94,19 +94,20 @@ class TestMlengineOperatorUtils:
     @mock.patch.object(PythonOperator, "set_upstream")
     @mock.patch.object(BeamRunPythonPipelineOperator, "set_upstream")
     def test_create_evaluate_ops(self, mock_beam_pipeline, mock_python):
-        result = create_evaluate_ops(
-            task_prefix=TASK_PREFIX,
-            data_format=DATA_FORMAT,
-            input_paths=INPUT_PATHS,
-            prediction_path=PREDICTION_PATH,
-            metric_fn_and_keys=get_metric_fn_and_keys(),
-            validate_fn=validate_err_and_count,
-            batch_prediction_job_id=BATCH_PREDICTION_JOB_ID,
-            project_id=PROJECT_ID,
-            region=REGION,
-            dataflow_options=DATAFLOW_OPTIONS,
-            model_uri=MODEL_URI,
-        )
+        with pytest.warns(AirflowProviderDeprecationWarning):
+            result = create_evaluate_ops(
+                task_prefix=TASK_PREFIX,
+                data_format=DATA_FORMAT,
+                input_paths=INPUT_PATHS,
+                prediction_path=PREDICTION_PATH,
+                metric_fn_and_keys=get_metric_fn_and_keys(),
+                validate_fn=validate_err_and_count,
+                batch_prediction_job_id=BATCH_PREDICTION_JOB_ID,
+                project_id=PROJECT_ID,
+                region=REGION,
+                dataflow_options=DATAFLOW_OPTIONS,
+                model_uri=MODEL_URI,
+            )
 
         evaluate_prediction, evaluate_summary, evaluate_validation = result
 
@@ -139,20 +140,21 @@ class TestMlengineOperatorUtils:
     @mock.patch.object(PythonOperator, "set_upstream")
     @mock.patch.object(BeamRunPythonPipelineOperator, "set_upstream")
     def test_create_evaluate_ops_model_and_version_name(self, mock_beam_pipeline, mock_python):
-        result = create_evaluate_ops(
-            task_prefix=TASK_PREFIX,
-            data_format=DATA_FORMAT,
-            input_paths=INPUT_PATHS,
-            prediction_path=PREDICTION_PATH,
-            metric_fn_and_keys=get_metric_fn_and_keys(),
-            validate_fn=validate_err_and_count,
-            batch_prediction_job_id=BATCH_PREDICTION_JOB_ID,
-            project_id=PROJECT_ID,
-            region=REGION,
-            dataflow_options=DATAFLOW_OPTIONS,
-            model_name=MODEL_NAME,
-            version_name=VERSION_NAME,
-        )
+        with pytest.warns(AirflowProviderDeprecationWarning):
+            result = create_evaluate_ops(
+                task_prefix=TASK_PREFIX,
+                data_format=DATA_FORMAT,
+                input_paths=INPUT_PATHS,
+                prediction_path=PREDICTION_PATH,
+                metric_fn_and_keys=get_metric_fn_and_keys(),
+                validate_fn=validate_err_and_count,
+                batch_prediction_job_id=BATCH_PREDICTION_JOB_ID,
+                project_id=PROJECT_ID,
+                region=REGION,
+                dataflow_options=DATAFLOW_OPTIONS,
+                model_name=MODEL_NAME,
+                version_name=VERSION_NAME,
+            )
 
         evaluate_prediction, evaluate_summary, evaluate_validation = result
 
@@ -186,16 +188,17 @@ class TestMlengineOperatorUtils:
     @mock.patch.object(PythonOperator, "set_upstream")
     @mock.patch.object(BeamRunPythonPipelineOperator, "set_upstream")
     def test_create_evaluate_ops_dag(self, mock_dataflow, mock_python):
-        result = create_evaluate_ops(
-            task_prefix=TASK_PREFIX,
-            data_format=DATA_FORMAT,
-            input_paths=INPUT_PATHS,
-            prediction_path=PREDICTION_PATH,
-            metric_fn_and_keys=get_metric_fn_and_keys(),
-            validate_fn=validate_err_and_count,
-            batch_prediction_job_id=BATCH_PREDICTION_JOB_ID,
-            dag=TEST_DAG,
-        )
+        with pytest.warns(AirflowProviderDeprecationWarning):
+            result = create_evaluate_ops(
+                task_prefix=TASK_PREFIX,
+                data_format=DATA_FORMAT,
+                input_paths=INPUT_PATHS,
+                prediction_path=PREDICTION_PATH,
+                metric_fn_and_keys=get_metric_fn_and_keys(),
+                validate_fn=validate_err_and_count,
+                batch_prediction_job_id=BATCH_PREDICTION_JOB_ID,
+                dag=TEST_DAG,
+            )
 
         evaluate_prediction, evaluate_summary, evaluate_validation = result
 
@@ -231,19 +234,20 @@ class TestMlengineOperatorUtils:
     @mock.patch.object(PythonOperator, "set_upstream")
     @mock.patch.object(BeamRunPythonPipelineOperator, "set_upstream")
     def test_apply_validate_fn(self, mock_beam_pipeline, mock_python, mock_download):
-        result = create_evaluate_ops(
-            task_prefix=TASK_PREFIX,
-            data_format=DATA_FORMAT,
-            input_paths=INPUT_PATHS,
-            prediction_path=PREDICTION_PATH,
-            metric_fn_and_keys=get_metric_fn_and_keys(),
-            validate_fn=validate_err_and_count,
-            batch_prediction_job_id=BATCH_PREDICTION_JOB_ID,
-            project_id=PROJECT_ID,
-            region=REGION,
-            dataflow_options=DATAFLOW_OPTIONS,
-            model_uri=MODEL_URI,
-        )
+        with pytest.warns(AirflowProviderDeprecationWarning):
+            result = create_evaluate_ops(
+                task_prefix=TASK_PREFIX,
+                data_format=DATA_FORMAT,
+                input_paths=INPUT_PATHS,
+                prediction_path=PREDICTION_PATH,
+                metric_fn_and_keys=get_metric_fn_and_keys(),
+                validate_fn=validate_err_and_count,
+                batch_prediction_job_id=BATCH_PREDICTION_JOB_ID,
+                project_id=PROJECT_ID,
+                region=REGION,
+                dataflow_options=DATAFLOW_OPTIONS,
+                model_uri=MODEL_URI,
+            )
 
         _, _, evaluate_validation = result
 

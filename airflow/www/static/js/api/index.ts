@@ -41,6 +41,7 @@ import useSetDagRunNote from "./useSetDagRunNote";
 import useSetTaskInstanceNote from "./useSetTaskInstanceNote";
 import useUpstreamDatasetEvents from "./useUpstreamDatasetEvents";
 import useTaskInstance from "./useTaskInstance";
+import useTaskFailedDependency from "./useTaskFailedDependency";
 import useDag from "./useDag";
 import useDagCode from "./useDagCode";
 import useDagDetails from "./useDagDetails";
@@ -53,6 +54,9 @@ import { useTaskXcomEntry, useTaskXcomCollection } from "./useTaskXcom";
 import useEventLogs from "./useEventLogs";
 import useCalendarData from "./useCalendarData";
 import useCreateDatasetEvent from "./useCreateDatasetEvent";
+import useRenderedK8s from "./useRenderedK8s";
+import useTaskDetail from "./useTaskDetail";
+import useTIHistory from "./useTIHistory";
 
 axios.interceptors.request.use((config) => {
   config.paramsSerializer = {
@@ -61,9 +65,15 @@ axios.interceptors.request.use((config) => {
   return config;
 });
 
-axios.interceptors.response.use((res: AxiosResponse) =>
-  res.data ? camelcaseKeys(res.data, { deep: true }) : res
-);
+axios.interceptors.response.use((res: AxiosResponse) => {
+  // Do not camelCase rendered_fields or extra
+  const stopPaths = ["rendered_fields", "extra", "dataset_events.extra"];
+  // Do not camelCase xCom entry results
+  if (res.config.url?.includes("/xcomEntries/")) {
+    stopPaths.push("value");
+  }
+  return res.data ? camelcaseKeys(res.data, { deep: true, stopPaths }) : res;
+});
 
 axios.defaults.headers.common.Accept = "application/json";
 
@@ -99,7 +109,11 @@ export {
   useHistoricalMetricsData,
   useTaskXcomEntry,
   useTaskXcomCollection,
+  useTaskFailedDependency,
   useEventLogs,
   useCalendarData,
   useCreateDatasetEvent,
+  useRenderedK8s,
+  useTaskDetail,
+  useTIHistory,
 };

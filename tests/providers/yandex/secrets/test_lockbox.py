@@ -19,6 +19,10 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, Mock, patch
 
+import pytest
+
+yandexcloud = pytest.importorskip("yandexcloud")
+
 import yandex.cloud.lockbox.v1.payload_pb2 as payload_pb
 import yandex.cloud.lockbox.v1.secret_pb2 as secret_pb
 import yandex.cloud.lockbox.v1.secret_service_pb2 as secret_service_pb
@@ -55,7 +59,7 @@ class TestLockboxSecretBackend:
     def test_yandex_lockbox_secret_backend_get_connection_from_json(self, mock_get_value):
         conn_id = "airflow_to_yandexcloud"
         conn_type = "yandex_cloud"
-        extra = "some extra values"
+        extra = '{"some": "extra values"}'
         c = {
             "conn_type": conn_type,
             "extra": extra,
@@ -65,9 +69,10 @@ class TestLockboxSecretBackend:
 
         conn = LockboxSecretBackend().get_connection(conn_id)
 
+        assert conn.extra == extra
+
         assert conn.conn_id == conn_id
         assert conn.conn_type == conn_type
-        assert conn.extra == extra
 
     @patch("airflow.providers.yandex.secrets.lockbox.LockboxSecretBackend._get_secret_value")
     def test_yandex_lockbox_secret_backend_get_variable(self, mock_get_value):

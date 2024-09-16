@@ -26,6 +26,7 @@ from typing import ClassVar
 
 import attr
 import pytest
+from pydantic import BaseModel
 
 from airflow.datasets import Dataset
 from airflow.serialization.serde import (
@@ -42,7 +43,6 @@ from airflow.serialization.serde import (
     serialize,
 )
 from airflow.utils.module_loading import import_string, iter_namespace, qualname
-from airflow.utils.pydantic import BaseModel
 from tests.test_utils.config import conf_vars
 
 
@@ -285,7 +285,7 @@ class TestSerDe:
     @conf_vars(
         {
             ("core", "allowed_deserialization_classes"): "",
-            ("core", "allowed_deserialization_classes_regexp"): "tests\.airflow\..",
+            ("core", "allowed_deserialization_classes_regexp"): r"tests\.airflow\..",
         }
     )
     @pytest.mark.usefixtures("recalculate_patterns")
@@ -299,7 +299,7 @@ class TestSerDe:
     @conf_vars(
         {
             ("core", "allowed_deserialization_classes"): "",
-            ("core", "allowed_deserialization_classes_regexp"): "tests\.airflow\.deep",
+            ("core", "allowed_deserialization_classes_regexp"): r"tests\.airflow\.deep",
         }
     )
     @pytest.mark.usefixtures("recalculate_patterns")

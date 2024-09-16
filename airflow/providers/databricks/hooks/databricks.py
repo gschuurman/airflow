@@ -29,6 +29,7 @@ or the ``api/2.1/jobs/runs/submit``
 from __future__ import annotations
 
 import json
+from enum import Enum
 from typing import Any
 
 from requests import exceptions as requests_exceptions
@@ -43,6 +44,7 @@ TERMINATE_CLUSTER_ENDPOINT = ("POST", "api/2.0/clusters/delete")
 
 CREATE_ENDPOINT = ("POST", "api/2.1/jobs/create")
 RESET_ENDPOINT = ("POST", "api/2.1/jobs/reset")
+UPDATE_ENDPOINT = ("POST", "api/2.1/jobs/update")
 RUN_NOW_ENDPOINT = ("POST", "api/2.1/jobs/run-now")
 SUBMIT_RUN_ENDPOINT = ("POST", "api/2.1/jobs/runs/submit")
 GET_RUN_ENDPOINT = ("GET", "api/2.1/jobs/runs/get")
@@ -51,7 +53,6 @@ DELETE_RUN_ENDPOINT = ("POST", "api/2.1/jobs/runs/delete")
 REPAIR_RUN_ENDPOINT = ("POST", "api/2.1/jobs/runs/repair")
 OUTPUT_RUNS_JOB_ENDPOINT = ("GET", "api/2.1/jobs/runs/get-output")
 CANCEL_ALL_RUNS_ENDPOINT = ("POST", "api/2.1/jobs/runs/cancel-all")
-UPDATE_PERMISSION_ENDPOINT = ("PATCH", "api/2.0/permissions/jobs")
 
 INSTALL_LIBS_ENDPOINT = ("POST", "api/2.0/libraries/install")
 UNINSTALL_LIBS_ENDPOINT = ("POST", "api/2.0/libraries/uninstall")
@@ -62,6 +63,24 @@ LIST_PIPELINES_ENDPOINT = ("GET", "api/2.0/pipelines")
 WORKSPACE_GET_STATUS_ENDPOINT = ("GET", "api/2.0/workspace/get-status")
 
 SPARK_VERSIONS_ENDPOINT = ("GET", "api/2.0/clusters/spark-versions")
+
+
+class RunLifeCycleState(Enum):
+    """
+    Enum for the run life cycle state concept of Databricks runs.
+
+    See more information at: https://docs.databricks.com/api/azure/workspace/jobs/listruns#runs-state-life_cycle_state
+    """
+
+    BLOCKED = "BLOCKED"
+    INTERNAL_ERROR = "INTERNAL_ERROR"
+    PENDING = "PENDING"
+    QUEUED = "QUEUED"
+    RUNNING = "RUNNING"
+    SKIPPED = "SKIPPED"
+    TERMINATED = "TERMINATED"
+    TERMINATING = "TERMINATING"
+    WAITING_FOR_RETRY = "WAITING_FOR_RETRY"
 
 
 class RunState:
@@ -198,7 +217,8 @@ class DatabricksHook(BaseDatabricksHook):
         super().__init__(databricks_conn_id, timeout_seconds, retry_limit, retry_delay, retry_args, caller)
 
     def create_job(self, json: dict) -> int:
-        """Call the ``api/2.1/jobs/create`` endpoint.
+        """
+        Call the ``api/2.1/jobs/create`` endpoint.
 
         :param json: The data used in the body of the request to the ``create`` endpoint.
         :return: the job_id as an int
@@ -207,11 +227,21 @@ class DatabricksHook(BaseDatabricksHook):
         return response["job_id"]
 
     def reset_job(self, job_id: str, json: dict) -> None:
-        """Call the ``api/2.1/jobs/reset`` endpoint.
+        """
+        Call the ``api/2.1/jobs/reset`` endpoint.
 
         :param json: The data used in the new_settings of the request to the ``reset`` endpoint.
         """
         self._do_api_call(RESET_ENDPOINT, {"job_id": job_id, "new_settings": json})
+
+    def update_job(self, job_id: str, json: dict) -> None:
+        """
+        Call the ``api/2.1/jobs/update`` endpoint.
+
+        :param job_id: The id of the job to update.
+        :param json: The data used in the new_settings of the request to the ``update`` endpoint.
+        """
+        self._do_api_call(UPDATE_ENDPOINT, {"job_id": job_id, "new_settings": json})
 
     def run_now(self, json: dict) -> int:
         """
@@ -239,6 +269,7 @@ class DatabricksHook(BaseDatabricksHook):
         expand_tasks: bool = False,
         job_name: str | None = None,
         page_token: str | None = None,
+        include_user_names: bool = False,
     ) -> list[dict[str, Any]]:
         """
         List the jobs in the Databricks Job Service.
@@ -258,6 +289,7 @@ class DatabricksHook(BaseDatabricksHook):
             payload: dict[str, Any] = {
                 "limit": limit,
                 "expand_tasks": expand_tasks,
+                "include_user_names": include_user_names,
             }
             payload["page_token"] = page_token
             if job_name:
@@ -492,6 +524,17 @@ class DatabricksHook(BaseDatabricksHook):
         run_output = self._do_api_call(OUTPUT_RUNS_JOB_ENDPOINT, json)
         return run_output
 
+    async def a_get_run_output(self, run_id: int) -> dict:
+        """
+        Async version of `get_run_output()`.
+
+        :param run_id: id of the run
+        :return: output of the run
+        """
+        json = {"run_id": run_id}
+        run_output = await self._a_do_api_call(OUTPUT_RUNS_JOB_ENDPOINT, json)
+        return run_output
+
     def cancel_run(self, run_id: int) -> None:
         """
         Cancel the run.
@@ -656,14 +699,15 @@ class DatabricksHook(BaseDatabricksHook):
 
         return None
 
-    def update_job_permission(self, json: dict[str, Any]) -> dict:
+    def update_job_permission(self, job_id: int, json: dict[str, Any]) -> dict:
         """
         Update databricks job permission.
 
+        :param job_id: job id
         :param json: payload
         :return: json containing permission specification
         """
-        return self._do_api_call(UPDATE_PERMISSION_ENDPOINT, json)
+        return self._do_api_call(("PATCH", f"api/2.0/permissions/jobs/{job_id}"), json)
 
     def test_connection(self) -> tuple[bool, str]:
         """Test the Databricks connectivity from UI."""
